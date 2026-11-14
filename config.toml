@@ -1,0 +1,25 @@
+# MegaClicker configuration.
+#
+# This file is read once at startup. Restart MegaClicker after editing it.
+# Invalid values stop startup with an error that names the field and its range.
+
+# Time between the start of consecutive clicks, in milliseconds.
+# Allowed: 1-1000
+interval_ms = 100
+
+# Mouse button to click.
+# Allowed: "left", "right", "middle"
+button = "left"
+
+# Click type. "double" sends two rapid button presses per click action and
+# still counts as ONE click action towards click_limit.
+# Allowed: "single", "double"
+click_type = "single"
+
+# Stop automatically after this many click actions. 0 means unlimited.
+# Allowed: 0-1000000000
+click_limit = 0
+
+# Delay before the first click after each start, in seconds.
+# Allowed: 0-5
+start_delay_seconds = 0
