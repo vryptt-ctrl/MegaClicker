@@ -10,6 +10,7 @@ mod hotkey;
 mod input;
 mod profile;
 mod single_instance;
+mod tray;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -23,6 +24,7 @@ use crate::config::{Button, ClickType, Config};
 use crate::engine::{ClickSink, Clicker, SessionReport, StartOutcome, StopReason};
 use crate::hotkey::{HotkeyAction, HotkeyError, Hotkeys};
 use crate::single_instance::InstanceError;
+use crate::tray::{Tray, TrayEvent};
 
 const EXIT_HOTKEY_CONFLICT: u8 = 2;
 const EXIT_ALREADY_RUNNING: u8 = 3;
@@ -137,6 +139,14 @@ fn run() -> anyhow::Result<ExitCode> {
     };
     let mut clicker = Clicker::spawn(active_config, sink)?;
 
+    let tray = match Tray::install("MegaClicker - press the toggle hotkey to click") {
+        Ok(tray) => Some(tray),
+        Err(error) => {
+            eprintln!("[warn] tray icon unavailable: {error}");
+            None
+        }
+    };
+
     println!(
         "Ready. Press {} to start or stop, {} to switch profile, {} to quit.",
         active_config.toggle_hotkey, active_config.profile_hotkey, active_config.quit_hotkey
@@ -149,6 +159,7 @@ fn run() -> anyhow::Result<ExitCode> {
         &config_path,
         &profile_name,
         active_config,
+        tray.as_ref(),
     );
 
     println!("[exit] shutting down...");
@@ -167,6 +178,7 @@ fn event_loop(
     config_path: &Path,
     initial_profile: &str,
     initial_config: Config,
+    tray: Option<&Tray>,
 ) {
     let mut active_profile = initial_profile.to_owned();
     let mut active_config = initial_config;
@@ -175,10 +187,40 @@ fn event_loop(
     let mut last_toggle: Option<Instant> = None;
     let mut last_status = Instant::now();
 
-    loop {
+    'outer: loop {
         if input::ctrl_c_pressed() {
             println!("[quit] Ctrl+C received.");
             break;
+        }
+
+        if let Some(tray) = tray {
+            tray.pump();
+            while let Some(event) = tray.try_recv() {
+                match event {
+                    TrayEvent::Toggle => toggle_clicking(
+                        clicker,
+                        &active_profile,
+                        &active_config,
+                        "the tray menu",
+                        &mut active_session,
+                        &mut running_since,
+                        &mut last_status,
+                    ),
+                    TrayEvent::NextProfile => switch_profile(
+                        clicker,
+                        base_config,
+                        config_path,
+                        &mut active_profile,
+                        &mut active_config,
+                    ),
+                    TrayEvent::OpenConfig => open_with_shell(config_path),
+                    TrayEvent::OpenProfiles => open_profiles_folder(config_path),
+                    TrayEvent::Quit => {
+                        println!("[quit] tray menu.");
+                        break 'outer;
+                    }
+                }
+            }
         }
 
         if let Some(action) = hotkeys.wait_for_event(EVENT_POLL_INTERVAL) {
@@ -190,28 +232,16 @@ fn event_loop(
                     }
                     last_toggle = Some(now);
 
-                    if clicker.is_running() {
-                        if clicker.stop() {
-                            println!(
-                                "[stop] {} received; stopping...",
-                                active_config.toggle_hotkey
-                            );
-                        }
-                    } else {
-                        match clicker.start() {
-                            StartOutcome::Started { session } => {
-                                active_session = Some(session);
-                                running_since = Some(Instant::now());
-                                last_status = Instant::now();
-                                print_session_start(&active_profile, &active_config);
-                            }
-                            StartOutcome::AlreadyRunning => {
-                                println!(
-                                    "[toggle] ignored: the previous session is still stopping"
-                                );
-                            }
-                        }
-                    }
+                    let source = active_config.toggle_hotkey.as_str();
+                    toggle_clicking(
+                        clicker,
+                        &active_profile,
+                        &active_config,
+                        source,
+                        &mut active_session,
+                        &mut running_since,
+                        &mut last_status,
+                    );
                 }
                 HotkeyAction::NextProfile => {
                     switch_profile(
@@ -245,6 +275,51 @@ fn event_loop(
                 last_status = Instant::now();
             }
         }
+    }
+}
+
+/// Start or stop clicking from either the hotkey or the tray menu.
+fn toggle_clicking(
+    clicker: &Clicker,
+    profile_name: &str,
+    config: &Config,
+    source: &str,
+    active_session: &mut Option<u64>,
+    running_since: &mut Option<Instant>,
+    last_status: &mut Instant,
+) {
+    if clicker.is_running() {
+        if clicker.stop() {
+            println!("[stop] stop requested from {source}; stopping...");
+        }
+        return;
+    }
+
+    match clicker.start() {
+        StartOutcome::Started { session } => {
+            *active_session = Some(session);
+            *running_since = Some(Instant::now());
+            *last_status = Instant::now();
+            print_session_start(profile_name, config);
+        }
+        StartOutcome::AlreadyRunning => {
+            println!("[toggle] ignored: the previous session is still stopping");
+        }
+    }
+}
+
+fn open_with_shell(path: &Path) {
+    if let Err(error) = tray::open_path(path) {
+        println!("[warn] could not open {}: {error}", path.display());
+    }
+}
+
+fn open_profiles_folder(config_path: &Path) {
+    let directory = profile::directory(config_path);
+
+    match std::fs::create_dir_all(&directory) {
+        Ok(()) => open_with_shell(&directory),
+        Err(error) => println!("[warn] could not create {}: {error}", directory.display()),
     }
 }
 

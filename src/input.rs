@@ -1,4 +1,4 @@
-//! The only module containing `unsafe` code.
+//! Win32 input, hotkey, and process-wide lock wrappers.
 //!
 //! MegaClicker needs four small Win32 surfaces:
 //! * `SendInput` for synthetic mouse clicks,
@@ -7,7 +7,8 @@
 //! * a named mutex for single-instance enforcement.
 //!
 //! Every FFI call is wrapped in a safe Rust API and every `unsafe` block has a
-//! `SAFETY:` comment explaining the invariants it relies on.
+//! `SAFETY:` comment explaining the invariants it relies on. The notification
+//! area wrapper lives in `tray.rs`, the only other module with `unsafe` code.
 
 use std::ffi::OsStr;
 use std::io;
@@ -30,7 +31,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     VK_F11, VK_F12, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    MsgWaitForMultipleObjectsEx, PeekMessageW, MSG, PM_REMOVE, QS_HOTKEY, WM_HOTKEY,
+    MsgWaitForMultipleObjectsEx, PeekMessageW, MSG, PM_REMOVE, QS_ALLINPUT, WM_HOTKEY,
 };
 
 use crate::config::{Button, ClickType, HotkeyKey};
@@ -169,16 +170,17 @@ pub fn unregister_hotkey(id: i32) -> io::Result<()> {
 /// Wait up to `timeout` for a global hotkey and return its id.
 ///
 /// This uses `MsgWaitForMultipleObjectsEx` so the thread sleeps instead of
-/// polling. `QS_HOTKEY` wakes the call immediately when Windows queues a
-/// `WM_HOTKEY` message.
+/// polling. `QS_ALLINPUT` wakes the call as soon as any message is queued,
+/// including the notification-area callbacks that `tray::Tray::pump` dispatches.
+/// Only `WM_HOTKEY` is removed here; every other message stays queued.
 pub fn wait_for_hotkey(timeout: Duration) -> Option<i32> {
     let milliseconds = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
 
     // SAFETY: Waiting for zero kernel objects with a null handle array is the
-    // documented way to wait for messages only. `QS_HOTKEY` is a valid wake
+    // documented way to wait for messages only. `QS_ALLINPUT` is a valid wake
     // mask and the parameter types match the Win32 signature.
     unsafe {
-        MsgWaitForMultipleObjectsEx(0, ptr::null(), milliseconds, QS_HOTKEY, 0);
+        MsgWaitForMultipleObjectsEx(0, ptr::null(), milliseconds, QS_ALLINPUT, 0);
     }
 
     let mut message = MSG::default();

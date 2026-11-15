@@ -1,6 +1,6 @@
 [package]
 name = "megaclicker"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.77"
 description = "A very light but very powerful auto clicker for Windows"
@@ -17,9 +17,12 @@ thiserror = "2.0"
 toml = "0.8"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_System_Console",
+    "Win32_System_LibraryLoader",
     "Win32_System_Threading",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

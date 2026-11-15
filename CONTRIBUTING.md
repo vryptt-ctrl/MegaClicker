@@ -24,7 +24,8 @@ cargo build --release
 - Run `cargo fmt` before committing
 - All clippy lints must pass with no warnings
 - Add tests for new functionality
-- Keep `unsafe` blocks confined to `src/input.rs` with `SAFETY:` comments
+- Keep `unsafe` blocks confined to `src/input.rs` and `src/tray.rs` with
+  `SAFETY:` comments
 
 ## Pull Request Process
 

@@ -1,9 +1,9 @@
 # MegaClicker
 
 A very light but very powerful auto clicker for **Windows 10/11 x64**, written
-in Rust. MegaClicker runs in a console, uses fixed global hotkeys, and keeps all
-behavior in one small TOML file. It has no GUI, no tray icon, no network access,
-and no telemetry.
+in Rust. MegaClicker runs in a console with a small notification-area icon, uses
+fixed global hotkeys, and keeps all behavior in one small TOML file. It has no
+settings window, no network access, and no telemetry.
 
 ## What it is
 
@@ -13,6 +13,8 @@ needed for that is included; everything else is deliberately left out.
 
 - Configurable global function keys start/stop clicking, switch profiles, and quit, even when another window is focused. Defaults are `F6`, `F7`, and `F8`.
 - Named profiles store alternate click settings in separate TOML files and can be switched at runtime with `F7`.
+- A tray icon mirrors the hotkeys: start/stop, switch profile, open the config or
+  profiles folder, and exit.
 - `Ctrl+C` also quits cleanly, stopping the click thread.
 - Interval, mouse button, single/double click, click limit, and start delay are
   configurable in `%APPDATA%\MegaClicker\config.toml`.
@@ -23,7 +25,7 @@ needed for that is included; everything else is deliberately left out.
 
 ### Not in the MVP
 
-No GUI, tray icon, settings window, randomized intervals, cursor movement,
+No settings GUI, randomized intervals, cursor movement,
 click sequences, recording/playback, scheduler, installer, auto-start,
 updater, localization, analytics, crash reporting,
 network features, or non-Windows builds.
@@ -98,10 +100,25 @@ Toggle presses within 250 ms are ignored (debounce). Starting while already
 running is a no-op; stopping while stopped is a no-op. All three hotkeys can be
 set to different function keys from F1 through F12 in the configuration.
 
+### Tray menu
+
+MegaClicker adds a notification-area icon while it runs. Right-click it for:
+
+| Item | Action |
+| --- | --- |
+| Start / stop clicking | Same as the toggle hotkey. |
+| Next profile | Same as the profile hotkey. |
+| Open config | Opens `config.toml` in the default editor. |
+| Open profiles folder | Opens the `profiles` folder, creating it if needed. |
+| Exit | Quits MegaClicker cleanly. |
+
+Double-clicking the icon opens the config file. If the shell refuses to add the
+icon, MegaClicker prints a warning and continues console-only.
+
 ### Startup output
 
 ```text
-MegaClicker 0.2.0 - lightweight auto clicker for Windows
+MegaClicker 0.3.0 - lightweight auto clicker for Windows
 Config: C:\Users\you\AppData\Roaming\MegaClicker\config.toml (created with defaults)
 Profile: default (click settings from config.toml)
   interval_ms         = 100
@@ -125,7 +142,7 @@ CPS, and measured stop latency.
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Normal shutdown from the quit hotkey or `Ctrl+C`. |
+| `0` | Normal shutdown from the quit hotkey, the tray menu, or `Ctrl+C`. |
 | `1` | Configuration, I/O, or unexpected startup error. |
 | `2` | A required global hotkey (toggle, profile, or quit) is already used by another application. |
 | `3` | Another MegaClicker instance is already running in this Windows session. |
@@ -290,8 +307,9 @@ and the target application's message loop dominate at that point.
 ## Known limitations and MVP trade-offs
 
 - **Windows only.** The MVP targets Windows 10/11 x64 and uses Win32 directly.
-- **Console only.** The console window must stay open; closing it terminates
-  MegaClicker. There is no tray icon or GUI.
+- **Console and tray icon.** The console window must stay open; closing it
+  terminates MegaClicker. The tray icon mirrors the main actions but there is no
+  settings GUI or hotkey rebinding yet.
 - **Function-key hotkeys only.** The toggle, profile, and quit hotkeys can be selected from F1–F12, but modifiers and arbitrary keys are not supported.
 - **Current cursor position.** MegaClicker does not move the cursor. Clicks go
   wherever the pointer currently is.
@@ -324,9 +342,11 @@ and the target application's message loop dominate at that point.
   `%APPDATA%\MegaClicker`.
 - Synthetic mouse input is sent only while a session is running.
 - `--dry-run` never calls `SendInput`.
-- All `unsafe` Rust is confined to [`src/input.rs`](src/input.rs), which wraps
-  the Win32 calls (`SendInput`, `RegisterHotKey`, the hotkey message queue,
-  `CreateMutexW`, and the console Ctrl+C handler). Each `unsafe` block has a
+- All `unsafe` Rust is confined to two platform modules:
+  [`src/input.rs`](src/input.rs), which wraps synthetic input, global hotkeys,
+  the message wait, the named mutex, and the console Ctrl+C handler; and
+  [`src/tray.rs`](src/tray.rs), which wraps the notification-area icon, its
+  hidden window, the popup menu, and `ShellExecuteW`. Each `unsafe` block has a
   `SAFETY:` comment. No other module contains `unsafe`.
 
 ## Project layout
@@ -339,7 +359,8 @@ src/
   profile.rs          named profile storage, discovery, cycle selection
   hotkey.rs           configurable global hotkeys, conflict errors, debounce
   engine.rs           click thread, state machine, scheduling, tests
-  input.rs            the only unsafe module: Win32 safe wrappers
+  input.rs            Win32 input, hotkey, and message-wait wrappers
+  tray.rs             notification-area icon, popup menu, shell launching
   single_instance.rs  named-mutex single-instance guard
 config.toml           default config written on first run
 ```
@@ -356,7 +377,8 @@ cargo build --release
 Unit tests cover configuration parsing and every range error, hotkey validation,
 profile creation and discovery, profile cycling with broken files, click-limit
 accounting, debounce behavior, start/stop no-ops, start delay, applying a new
-config to the next session, and a dry-run session that reaches its limit.
+config to the next session, tray string handling, and a dry-run session that
+reaches its limit.
 
 To measure timing safely without clicking anything:
 
@@ -374,10 +396,11 @@ Done:
 
 - [x] Configurable global hotkeys (`v0.1.1`)
 - [x] Multiple profiles and per-profile config switching (`v0.2.0`)
+- [x] Tray icon with a native menu (`v0.3.0`)
 
 Planned:
 
-- [ ] Tray icon and settings GUI, with hotkey rebinding
+- [ ] Settings GUI, with hotkey rebinding
 - [ ] Randomized/human-like intervals and cursor movement (with clear disclaimers)
 - [ ] Click sequences, multi-point macros, recording/playback
 - [ ] Installer, auto-start, updater
