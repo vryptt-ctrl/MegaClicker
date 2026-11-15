@@ -943,7 +943,10 @@ mod tests {
 
     #[test]
     fn renders_defaults_like_the_committed_example() {
-        assert_eq!(Config::default().to_toml(), DEFAULT_CONFIG_TOML);
+        // Windows checkouts can convert the committed file to CRLF, while
+        // `to_toml` always renders LF, so normalize before comparing.
+        let committed = DEFAULT_CONFIG_TOML.replace("\r\n", "\n");
+        assert_eq!(Config::default().to_toml(), committed);
     }
 
     #[test]
