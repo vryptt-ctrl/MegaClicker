@@ -1,13 +1,14 @@
-//! MegaClicker MVP startup, wiring, console UI, and shutdown.
+//! MegaClicker startup, wiring, console UI, and shutdown.
 
 #[cfg(not(windows))]
-compile_error!("MegaClicker MVP supports Windows 10/11 x64 only.");
+compile_error!("MegaClicker supports Windows 10/11 x64 only.");
 
 mod cli;
 mod config;
 mod engine;
 mod hotkey;
 mod input;
+mod profile;
 mod single_instance;
 
 use std::path::Path;
@@ -58,17 +59,10 @@ fn run() -> anyhow::Result<ExitCode> {
     );
 
     if let Err(error) = input::install_ctrl_c_handler() {
-        eprintln!("[warn] Ctrl+C clean shutdown is unavailable: {error}. Use F8 to quit.");
+        eprintln!(
+            "[warn] Ctrl+C clean shutdown is unavailable: {error}. Use the configured quit hotkey."
+        );
     }
-
-    let _instance = match single_instance::InstanceGuard::acquire() {
-        Ok(guard) => guard,
-        Err(error @ InstanceError::AlreadyRunning) => {
-            eprintln!("[error] {error}");
-            return Ok(ExitCode::from(EXIT_ALREADY_RUNNING));
-        }
-        Err(error) => return Err(error.into()),
-    };
 
     let config_path = match cli.config.clone() {
         Some(path) => path,
@@ -87,9 +81,47 @@ fn run() -> anyhow::Result<ExitCode> {
             .with_context(|| format!("config file: {}", config_path.display()))?
     };
 
-    print_startup(&config_path, &loaded, cli.dry_run);
+    if cli.list_profiles {
+        print_profiles(&config_path);
+        return Ok(ExitCode::SUCCESS);
+    }
 
-    let hotkeys = match Hotkeys::register(loaded.config.toggle_hotkey, loaded.config.quit_hotkey) {
+    let _instance = match single_instance::InstanceGuard::acquire() {
+        Ok(guard) => guard,
+        Err(error @ InstanceError::AlreadyRunning) => {
+            eprintln!("[error] {error}");
+            return Ok(ExitCode::from(EXIT_ALREADY_RUNNING));
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    let (profile_name, active_config) = match &cli.profile {
+        Some(name) => {
+            let profile = profile::load_or_create(&config_path, name).with_context(|| {
+                format!(
+                    "profile `{name}` in {}",
+                    profile::directory(&config_path).display()
+                )
+            })?;
+            let active = loaded.config.with_click_settings(&profile.settings);
+            (profile.name, active)
+        }
+        None => (profile::DEFAULT_PROFILE.to_owned(), loaded.config),
+    };
+
+    print_startup(
+        &config_path,
+        &loaded,
+        &active_config,
+        &profile_name,
+        cli.dry_run,
+    );
+
+    let hotkeys = match Hotkeys::register(
+        active_config.toggle_hotkey,
+        active_config.quit_hotkey,
+        active_config.profile_hotkey,
+    ) {
         Ok(hotkeys) => hotkeys,
         Err(error @ HotkeyError::Conflict { .. }) => {
             eprintln!("[error] {error}");
@@ -103,11 +135,21 @@ fn run() -> anyhow::Result<ExitCode> {
     } else {
         Box::new(SystemSink)
     };
-    let mut clicker = Clicker::spawn(loaded.config, sink)?;
+    let mut clicker = Clicker::spawn(active_config, sink)?;
 
-    println!("Ready. Press F6 to start or stop, F8 to quit.");
+    println!(
+        "Ready. Press {} to start or stop, {} to switch profile, {} to quit.",
+        active_config.toggle_hotkey, active_config.profile_hotkey, active_config.quit_hotkey
+    );
 
-    event_loop(&hotkeys, &clicker, &loaded.config);
+    event_loop(
+        &hotkeys,
+        &clicker,
+        &loaded.config,
+        &config_path,
+        &profile_name,
+        active_config,
+    );
 
     println!("[exit] shutting down...");
     clicker.shutdown();
@@ -118,7 +160,16 @@ fn run() -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn event_loop(hotkeys: &Hotkeys, clicker: &Clicker, config: &Config) {
+fn event_loop(
+    hotkeys: &Hotkeys,
+    clicker: &Clicker,
+    base_config: &Config,
+    config_path: &Path,
+    initial_profile: &str,
+    initial_config: Config,
+) {
+    let mut active_profile = initial_profile.to_owned();
+    let mut active_config = initial_config;
     let mut active_session: Option<u64> = None;
     let mut running_since: Option<Instant> = None;
     let mut last_toggle: Option<Instant> = None;
@@ -141,7 +192,10 @@ fn event_loop(hotkeys: &Hotkeys, clicker: &Clicker, config: &Config) {
 
                     if clicker.is_running() {
                         if clicker.stop() {
-                            println!("[stop] {} received; stopping...", config.toggle_hotkey);
+                            println!(
+                                "[stop] {} received; stopping...",
+                                active_config.toggle_hotkey
+                            );
                         }
                     } else {
                         match clicker.start() {
@@ -149,7 +203,7 @@ fn event_loop(hotkeys: &Hotkeys, clicker: &Clicker, config: &Config) {
                                 active_session = Some(session);
                                 running_since = Some(Instant::now());
                                 last_status = Instant::now();
-                                print_session_start(config);
+                                print_session_start(&active_profile, &active_config);
                             }
                             StartOutcome::AlreadyRunning => {
                                 println!(
@@ -159,8 +213,17 @@ fn event_loop(hotkeys: &Hotkeys, clicker: &Clicker, config: &Config) {
                         }
                     }
                 }
+                HotkeyAction::NextProfile => {
+                    switch_profile(
+                        clicker,
+                        base_config,
+                        config_path,
+                        &mut active_profile,
+                        &mut active_config,
+                    );
+                }
                 HotkeyAction::Quit => {
-                    println!("[quit] F8 received.");
+                    println!("[quit] {} received.", active_config.quit_hotkey);
                     break;
                 }
             }
@@ -203,7 +266,36 @@ fn status_message(clicker: &Clicker, running_since: Option<Instant>) -> Option<S
     ))
 }
 
-fn print_startup(path: &Path, loaded: &config::Loaded, dry_run: bool) {
+fn print_profiles(config_path: &Path) {
+    println!("Profiles in {}:", profile::directory(config_path).display());
+    println!("  default");
+    println!("    {}", config_path.display());
+
+    match profile::list(config_path) {
+        Ok(names) if names.is_empty() => println!("  (no named profiles yet)"),
+        Ok(names) => {
+            for name in names {
+                if let Ok(path) = profile::path_for(config_path, &name) {
+                    println!("  {name}");
+                    println!("    {}", path.display());
+                }
+            }
+        }
+        Err(error) => println!("[error] {error}"),
+    }
+
+    println!(
+        "Start with --profile <NAME> to use a profile; a missing file is created with defaults."
+    );
+}
+
+fn print_startup(
+    path: &Path,
+    loaded: &config::Loaded,
+    active: &Config,
+    profile_name: &str,
+    dry_run: bool,
+) {
     let state = if loaded.created {
         "created with defaults"
     } else {
@@ -211,23 +303,25 @@ fn print_startup(path: &Path, loaded: &config::Loaded, dry_run: bool) {
     };
 
     println!("Config: {} ({state})", path.display());
-    println!(
-        "  interval_ms         = {}",
-        loaded.config.interval.as_millis()
-    );
-    println!("  button              = {}", loaded.config.button);
-    println!("  click_type          = {}", loaded.config.click_type);
-    if loaded.config.click_limit == 0 {
+    if profile_name.eq_ignore_ascii_case(profile::DEFAULT_PROFILE) {
+        println!("Profile: default (click settings from config.toml)");
+    } else if let Ok(profile_path) = profile::path_for(path, profile_name) {
+        println!("Profile: {profile_name} ({})", profile_path.display());
+    } else {
+        println!("Profile: {profile_name}");
+    }
+    println!("  interval_ms         = {}", active.interval.as_millis());
+    println!("  button              = {}", active.button);
+    println!("  click_type          = {}", active.click_type);
+    if active.click_limit == 0 {
         println!("  click_limit         = 0 (unlimited)");
     } else {
-        println!("  click_limit         = {}", loaded.config.click_limit);
+        println!("  click_limit         = {}", active.click_limit);
     }
-    println!(
-        "  start_delay_seconds = {}",
-        loaded.config.start_delay.as_secs()
-    );
-    println!("  toggle_hotkey       = {}", loaded.config.toggle_hotkey);
-    println!("  quit_hotkey         = {}", loaded.config.quit_hotkey);
+    println!("  start_delay_seconds = {}", active.start_delay.as_secs());
+    println!("  toggle_hotkey       = {}", active.toggle_hotkey);
+    println!("  quit_hotkey         = {}", active.quit_hotkey);
+    println!("  profile_hotkey      = {}", active.profile_hotkey);
     println!(
         "Mode: {}",
         if dry_run {
@@ -237,24 +331,77 @@ fn print_startup(path: &Path, loaded: &config::Loaded, dry_run: bool) {
         }
     );
     println!(
-        "Hotkeys: {} = start/stop | {} = quit | Ctrl+C = quit",
-        loaded.config.toggle_hotkey, loaded.config.quit_hotkey
+        "Hotkeys: {} = start/stop | {} = next profile | {} = quit | Ctrl+C = quit",
+        active.toggle_hotkey, active.profile_hotkey, active.quit_hotkey
     );
 }
 
-fn print_session_start(config: &Config) {
+/// Advance to the next profile and apply its click settings to the next
+/// session. Hotkeys and the running session are deliberately untouched.
+fn switch_profile(
+    clicker: &Clicker,
+    base_config: &Config,
+    config_path: &Path,
+    active_profile: &mut String,
+    active_config: &mut Config,
+) {
+    let outcome = match profile::cycle(config_path, active_profile) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            println!("[error] cannot switch profile: {error}");
+            return;
+        }
+    };
+
+    for warning in outcome.skipped {
+        println!("[warn] skipped profile: {warning}");
+    }
+
+    let name = outcome.selection.name().to_owned();
+    let config = outcome.selection.apply(base_config);
+
+    if name.eq_ignore_ascii_case(active_profile) {
+        println!("[profile] no other usable profile is available; staying on `{name}`.");
+        return;
+    }
+
+    *active_profile = name;
+    *active_config = config;
+    clicker.set_config(config);
+
+    println!(
+        "[profile] active: {active_profile} | {}",
+        settings_summary(&config)
+    );
+    if clicker.is_running() {
+        println!(
+            "[profile] the running session keeps its settings; stop and start to use this profile."
+        );
+    } else {
+        println!("[profile] the new settings apply to the next session.");
+    }
+}
+
+fn settings_summary(config: &Config) -> String {
     let limit = if config.click_limit == 0 {
         "unlimited".to_owned()
     } else {
         config.click_limit.to_string()
     };
 
-    println!(
-        "[start] interval={} ms | button={} | type={} | limit={limit} | start delay={} s",
+    format!(
+        "interval={} ms | button={} | type={} | limit={limit} | start delay={} s",
         config.interval.as_millis(),
         config.button,
         config.click_type,
         config.start_delay.as_secs()
+    )
+}
+
+fn print_session_start(profile_name: &str, config: &Config) {
+    println!(
+        "[start] profile={profile_name} | {}",
+        settings_summary(config)
     );
 }
 

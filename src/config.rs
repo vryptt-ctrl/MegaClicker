@@ -150,6 +150,29 @@ impl std::fmt::Display for HotkeyKey {
     }
 }
 
+/// Click behavior shared by the base configuration and every profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClickSettings {
+    pub interval: Duration,
+    pub button: Button,
+    pub click_type: ClickType,
+    /// 0 means unlimited.
+    pub click_limit: u64,
+    pub start_delay: Duration,
+}
+
+impl Default for ClickSettings {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_millis(DEFAULT_INTERVAL_MS),
+            button: Button::Left,
+            click_type: ClickType::Single,
+            click_limit: 0,
+            start_delay: Duration::ZERO,
+        }
+    }
+}
+
 /// Validated runtime configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Config {
@@ -158,6 +181,7 @@ pub struct Config {
     pub click_type: ClickType,
     pub toggle_hotkey: HotkeyKey,
     pub quit_hotkey: HotkeyKey,
+    pub profile_hotkey: HotkeyKey,
     /// 0 means unlimited.
     pub click_limit: u64,
     pub start_delay: Duration,
@@ -171,6 +195,7 @@ impl Default for Config {
             click_type: ClickType::Single,
             toggle_hotkey: HotkeyKey::F6,
             quit_hotkey: HotkeyKey::F8,
+            profile_hotkey: HotkeyKey::F7,
             click_limit: 0,
             start_delay: Duration::ZERO,
         }
@@ -245,6 +270,25 @@ struct RawConfig {
     toggle_hotkey: String,
     #[serde(default = "default_quit_hotkey")]
     quit_hotkey: String,
+    #[serde(default = "default_profile_hotkey")]
+    profile_hotkey: String,
+    #[serde(default)]
+    click_limit: i64,
+    #[serde(default)]
+    start_delay_seconds: i64,
+}
+
+/// Raw shape of a profile file. Profiles intentionally omit hotkeys: hotkeys
+/// belong to the base configuration and stay active across profile switches.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawProfile {
+    #[serde(default = "default_interval_ms")]
+    interval_ms: i64,
+    #[serde(default = "default_button")]
+    button: String,
+    #[serde(default = "default_click_type")]
+    click_type: String,
     #[serde(default)]
     click_limit: i64,
     #[serde(default)]
@@ -271,6 +315,10 @@ fn default_quit_hotkey() -> String {
     HotkeyKey::F8.as_str().to_owned()
 }
 
+fn default_profile_hotkey() -> String {
+    HotkeyKey::F7.as_str().to_owned()
+}
+
 impl Config {
     /// Parse and validate TOML text. Kept separate from file IO so the
     /// validation rules are easy to test.
@@ -278,26 +326,12 @@ impl Config {
         let raw: RawConfig =
             toml::from_str(text).map_err(|source| ConfigError::Parse { source })?;
 
-        let interval_ms = validate_integer(
-            "interval_ms",
+        let settings = validate_click_settings(
             raw.interval_ms,
-            1,
-            MAX_INTERVAL_MS,
-            INTERVAL_EXPECTED,
-        )?;
-        let click_limit = validate_integer(
-            "click_limit",
+            &raw.button,
+            &raw.click_type,
             raw.click_limit,
-            0,
-            MAX_CLICK_LIMIT,
-            LIMIT_EXPECTED,
-        )?;
-        let start_delay_seconds = validate_integer(
-            "start_delay_seconds",
             raw.start_delay_seconds,
-            0,
-            MAX_START_DELAY_SECONDS,
-            DELAY_EXPECTED,
         )?;
 
         let toggle_hotkey =
@@ -312,37 +346,128 @@ impl Config {
                 value: raw.quit_hotkey.clone(),
                 expected: "one of F1 through F12",
             })?;
-        if toggle_hotkey == quit_hotkey {
-            return Err(ConfigError::InvalidField {
-                field: "quit_hotkey",
-                value: raw.quit_hotkey.clone(),
-                expected: "a function key different from toggle_hotkey",
-            });
-        }
-
-        let button = Button::parse(&raw.button).ok_or_else(|| ConfigError::InvalidField {
-            field: "button",
-            value: raw.button.clone(),
-            expected: BUTTON_EXPECTED,
-        })?;
-
-        let click_type =
-            ClickType::parse(&raw.click_type).ok_or_else(|| ConfigError::InvalidField {
-                field: "click_type",
-                value: raw.click_type.clone(),
-                expected: CLICK_TYPE_EXPECTED,
+        let profile_hotkey =
+            HotkeyKey::parse(&raw.profile_hotkey).ok_or_else(|| ConfigError::InvalidField {
+                field: "profile_hotkey",
+                value: raw.profile_hotkey.clone(),
+                expected: "one of F1 through F12",
             })?;
 
+        validate_hotkeys(
+            (toggle_hotkey, &raw.toggle_hotkey),
+            (quit_hotkey, &raw.quit_hotkey),
+            (profile_hotkey, &raw.profile_hotkey),
+        )?;
+
         Ok(Self {
-            interval: Duration::from_millis(interval_ms),
-            button,
-            click_type,
+            interval: settings.interval,
+            button: settings.button,
+            click_type: settings.click_type,
             toggle_hotkey,
             quit_hotkey,
-            click_limit,
-            start_delay: Duration::from_secs(start_delay_seconds),
+            profile_hotkey,
+            click_limit: settings.click_limit,
+            start_delay: settings.start_delay,
         })
     }
+
+    /// Replace every click setting while keeping the hotkeys unchanged.
+    pub fn with_click_settings(&self, settings: &ClickSettings) -> Self {
+        Self {
+            interval: settings.interval,
+            button: settings.button,
+            click_type: settings.click_type,
+            click_limit: settings.click_limit,
+            start_delay: settings.start_delay,
+            ..*self
+        }
+    }
+}
+
+/// Parse the click settings used by profile files.
+pub fn parse_click_settings(text: &str) -> Result<ClickSettings, ConfigError> {
+    let raw: RawProfile = toml::from_str(text).map_err(|source| ConfigError::Parse { source })?;
+
+    validate_click_settings(
+        raw.interval_ms,
+        &raw.button,
+        &raw.click_type,
+        raw.click_limit,
+        raw.start_delay_seconds,
+    )
+}
+
+fn validate_click_settings(
+    interval_ms: i64,
+    button: &str,
+    click_type: &str,
+    click_limit: i64,
+    start_delay_seconds: i64,
+) -> Result<ClickSettings, ConfigError> {
+    let interval_ms = validate_integer(
+        "interval_ms",
+        interval_ms,
+        1,
+        MAX_INTERVAL_MS,
+        INTERVAL_EXPECTED,
+    )?;
+    let click_limit = validate_integer(
+        "click_limit",
+        click_limit,
+        0,
+        MAX_CLICK_LIMIT,
+        LIMIT_EXPECTED,
+    )?;
+    let start_delay_seconds = validate_integer(
+        "start_delay_seconds",
+        start_delay_seconds,
+        0,
+        MAX_START_DELAY_SECONDS,
+        DELAY_EXPECTED,
+    )?;
+
+    let button = Button::parse(button).ok_or_else(|| ConfigError::InvalidField {
+        field: "button",
+        value: button.to_owned(),
+        expected: BUTTON_EXPECTED,
+    })?;
+
+    let click_type = ClickType::parse(click_type).ok_or_else(|| ConfigError::InvalidField {
+        field: "click_type",
+        value: click_type.to_owned(),
+        expected: CLICK_TYPE_EXPECTED,
+    })?;
+
+    Ok(ClickSettings {
+        interval: Duration::from_millis(interval_ms),
+        button,
+        click_type,
+        click_limit,
+        start_delay: Duration::from_secs(start_delay_seconds),
+    })
+}
+
+fn validate_hotkeys(
+    toggle: (HotkeyKey, &str),
+    quit: (HotkeyKey, &str),
+    profile: (HotkeyKey, &str),
+) -> Result<(), ConfigError> {
+    if toggle.0 == quit.0 {
+        return Err(ConfigError::InvalidField {
+            field: "quit_hotkey",
+            value: quit.1.to_owned(),
+            expected: "a function key different from toggle_hotkey",
+        });
+    }
+    if profile.0 == toggle.0 || profile.0 == quit.0 {
+        return Err(ConfigError::InvalidField {
+            field: "profile_hotkey",
+            value: profile.1.to_owned(),
+            expected: "a function key different from toggle_hotkey and quit_hotkey",
+        });
+    }
+
+    Ok(())
 }
 
 fn validate_integer(
@@ -438,6 +563,7 @@ mod tests {
         assert_eq!(config.click_type, ClickType::Single);
         assert_eq!(config.toggle_hotkey, HotkeyKey::F6);
         assert_eq!(config.quit_hotkey, HotkeyKey::F8);
+        assert_eq!(config.profile_hotkey, HotkeyKey::F7);
         assert_eq!(config.click_limit, 0);
         assert_eq!(config.start_delay, Duration::ZERO);
     }
@@ -459,10 +585,12 @@ mod tests {
 
     #[test]
     fn accepts_function_key_hotkeys_case_insensitively() {
-        let config = parse("toggle_hotkey = \"f1\"\nquit_hotkey = \"F12\"")
-            .expect("valid function keys must be accepted");
+        let config =
+            parse("toggle_hotkey = \"f1\"\nquit_hotkey = \"F12\"\nprofile_hotkey = \"f5\"")
+                .expect("valid function keys must be accepted");
         assert_eq!(config.toggle_hotkey, HotkeyKey::F1);
         assert_eq!(config.quit_hotkey, HotkeyKey::F12);
+        assert_eq!(config.profile_hotkey, HotkeyKey::F5);
     }
 
     #[test]
@@ -473,10 +601,47 @@ mod tests {
                 "toggle_hotkey = \"F6\"\nquit_hotkey = \"F6\"",
                 "quit_hotkey",
             ),
+            (
+                "toggle_hotkey = \"F6\"\nquit_hotkey = \"F8\"\nprofile_hotkey = \"F6\"",
+                "profile_hotkey",
+            ),
+            (
+                "toggle_hotkey = \"F6\"\nquit_hotkey = \"F8\"\nprofile_hotkey = \"F8\"",
+                "profile_hotkey",
+            ),
         ] {
             let error = parse(toml).expect_err("invalid hotkeys must fail");
             assert!(error.to_string().contains(expected));
         }
+    }
+
+    #[test]
+    fn profile_parser_accepts_click_settings_only() {
+        let settings =
+            parse_click_settings("interval_ms = 25\nbutton = \"right\"\nclick_type = \"double\"")
+                .expect("valid profile settings");
+        assert_eq!(settings.interval, Duration::from_millis(25));
+        assert_eq!(settings.button, Button::Right);
+        assert_eq!(settings.click_type, ClickType::Double);
+
+        let error = parse_click_settings("toggle_hotkey = \"F6\"")
+            .expect_err("profiles must not carry hotkeys");
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn with_click_settings_keeps_hotkeys() {
+        let config = parse(
+            "interval_ms = 10\ntoggle_hotkey = \"F2\"\nquit_hotkey = \"F3\"\nprofile_hotkey = \"F4\"",
+        )
+        .expect("valid config");
+        let settings = parse_click_settings("interval_ms = 500").expect("valid settings");
+        let updated = config.with_click_settings(&settings);
+
+        assert_eq!(updated.interval, Duration::from_millis(500));
+        assert_eq!(updated.toggle_hotkey, HotkeyKey::F2);
+        assert_eq!(updated.quit_hotkey, HotkeyKey::F3);
+        assert_eq!(updated.profile_hotkey, HotkeyKey::F4);
     }
 
     #[test]

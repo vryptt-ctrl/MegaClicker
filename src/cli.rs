@@ -12,8 +12,17 @@ use clap::Parser;
 )]
 pub struct Cli {
     /// Path to a TOML config file (defaults to %APPDATA%\MegaClicker\config.toml).
+    /// Profiles are stored in a `profiles` folder next to this file.
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
+
+    /// Start with a named click profile, creating it with defaults if missing.
+    #[arg(long, value_name = "NAME", conflicts_with = "list_profiles")]
+    pub profile: Option<String>,
+
+    /// List the default profile and every named profile, then exit.
+    #[arg(long)]
+    pub list_profiles: bool,
 
     /// Count clicks and follow the real timing without sending mouse input.
     #[arg(long)]

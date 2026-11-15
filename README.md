@@ -11,7 +11,8 @@ MegaClicker's MVP does one job: click reliably at a configured interval, under
 global hotkey control, with measurable timing and clean shutdown. Everything
 needed for that is included; everything else is deliberately left out.
 
-- Configurable global function keys start/stop clicking and quit, even when another window is focused. Defaults are `F6` and `F8`.
+- Configurable global function keys start/stop clicking, switch profiles, and quit, even when another window is focused. Defaults are `F6`, `F7`, and `F8`.
+- Named profiles store alternate click settings in separate TOML files and can be switched at runtime with `F7`.
 - `Ctrl+C` also quits cleanly, stopping the click thread.
 - Interval, mouse button, single/double click, click limit, and start delay are
   configurable in `%APPDATA%\MegaClicker\config.toml`.
@@ -23,7 +24,7 @@ needed for that is included; everything else is deliberately left out.
 ### Not in the MVP
 
 No GUI, tray icon, settings window, randomized intervals, cursor movement,
-click sequences, recording/playback, profiles, scheduler, installer, auto-start,
+click sequences, recording/playback, scheduler, installer, auto-start,
 updater, localization, analytics, crash reporting,
 network features, or non-Windows builds.
 
@@ -70,12 +71,16 @@ To remove MegaClicker, delete the executable and optionally the config folder
 .\megaclicker.exe
 .\megaclicker.exe --dry-run
 .\megaclicker.exe --config .\my-config.toml
+.\megaclicker.exe --profile gaming
+.\megaclicker.exe --list-profiles
 .\megaclicker.exe --version
 ```
 
 | Flag | Meaning |
 | --- | --- |
-| `--config <PATH>` | Use an existing config file instead of the default. A missing file is an error, so typos are not silently replaced. |
+| `--config <PATH>` | Use an existing config file instead of the default. A missing file is an error, so typos are not silently replaced. Profiles are stored in a `profiles` folder next to this file. |
+| `--profile <NAME>` | Start with the named profile, creating it with defaults if the file does not exist. |
+| `--list-profiles` | Print the default profile and every named profile, then exit. |
 | `--dry-run` | Count clicks and use the real timing, but do not send mouse input. |
 | `--version` | Print the version and exit. |
 | `--help` | Print CLI help and exit. |
@@ -85,26 +90,31 @@ To remove MegaClicker, delete the executable and optionally the config folder
 | Key | Action |
 | --- | --- |
 | Configured `toggle_hotkey` (default `F6`) | Start clicking, or stop the current session. Works globally, even when MegaClicker is not the focused window. |
+| Configured `profile_hotkey` (default `F7`) | Switch to the next usable profile. |
 | Configured `quit_hotkey` (default `F8`) | Quit MegaClicker. |
 | `Ctrl+C` | Quit MegaClicker. |
 
 Toggle presses within 250 ms are ignored (debounce). Starting while already
-running is a no-op; stopping while stopped is a no-op. Both hotkeys can be set
-to different function keys from F1 through F12 in the configuration.
+running is a no-op; stopping while stopped is a no-op. All three hotkeys can be
+set to different function keys from F1 through F12 in the configuration.
 
 ### Startup output
 
 ```text
-MegaClicker 0.1.1 - lightweight auto clicker for Windows
+MegaClicker 0.2.0 - lightweight auto clicker for Windows
 Config: C:\Users\you\AppData\Roaming\MegaClicker\config.toml (created with defaults)
+Profile: default (click settings from config.toml)
   interval_ms         = 100
   button              = left
   click_type          = single
   click_limit         = 0 (unlimited)
   start_delay_seconds = 0
+  toggle_hotkey       = F6
+  quit_hotkey         = F8
+  profile_hotkey      = F7
 Mode: live (clicks are sent at the current cursor position)
-Hotkeys: F6 = start/stop | F8 = quit | Ctrl+C = quit
-Ready. Press F6 to start or stop, F8 to quit.
+Hotkeys: F6 = start/stop | F7 = next profile | F8 = quit | Ctrl+C = quit
+Ready. Press F6 to start or stop, F7 to switch profile, F8 to quit.
 ```
 
 While running, MegaClicker prints the start settings, a status line every five
@@ -115,9 +125,9 @@ CPS, and measured stop latency.
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Normal shutdown from `F8` or `Ctrl+C`. |
+| `0` | Normal shutdown from the quit hotkey or `Ctrl+C`. |
 | `1` | Configuration, I/O, or unexpected startup error. |
-| `2` | A required global hotkey (`F6` or `F8`) is already used by another application. |
+| `2` | A required global hotkey (toggle, profile, or quit) is already used by another application. |
 | `3` | Another MegaClicker instance is already running in this Windows session. |
 
 ## Configuration
@@ -151,8 +161,9 @@ auto-create a missing file.
 | `click_type` | `"single"` | `"single"`, `"double"` | One press/release pair, or two rapid pairs per click action. |
 | `click_limit` | `0` | `0`–`1000000000` | Stop after this many click actions. `0` means unlimited. |
 | `start_delay_seconds` | `0` | `0`–`5` | Delay before the first click after each start. Applies only to the first click. |
-| `toggle_hotkey` | `"F6"` | `"F1"`–`"F12"` | Global key to start/stop clicking. Must differ from `quit_hotkey`. |
-| `quit_hotkey` | `"F8"` | `"F1"`–`"F12"` | Global key to quit. Must differ from `toggle_hotkey`. |
+| `toggle_hotkey` | `"F6"` | `"F1"`–`"F12"` | Global key to start/stop clicking. Must differ from the other hotkeys. |
+| `quit_hotkey` | `"F8"` | `"F1"`–`"F12"` | Global key to quit. Must differ from the other hotkeys. |
+| `profile_hotkey` | `"F7"` | `"F1"`–`"F12"` | Global key to switch to the next profile. Must differ from the other hotkeys. |
 
 String values are matched case-insensitively. Unknown keys are rejected rather
 than ignored, so typos cannot silently fall back to a default.
@@ -180,11 +191,41 @@ click_limit = 0
 # Allowed: 0-5
 start_delay_seconds = 0
 
-# Global function keys; they must differ from each other.
+# Global function keys; they must all differ from each other.
 # Allowed: "F1" through "F12"
 toggle_hotkey = "F6"
 quit_hotkey = "F8"
+profile_hotkey = "F7"
 ```
+
+### Profiles
+
+A profile is a named set of click settings stored as its own TOML file:
+
+```text
+%APPDATA%\MegaClicker\profiles\gaming.toml
+```
+
+Profiles contain only `interval_ms`, `button`, `click_type`, `click_limit`, and
+`start_delay_seconds`. Hotkeys are global: they stay registered when profiles
+change. A missing profile file is created with defaults the first time it is
+selected:
+
+```powershell
+.\megaclicker.exe --profile gaming
+.\megaclicker.exe --list-profiles
+```
+
+Use the configured `profile_hotkey` (default `F7`) to cycle through `default`
+and the named profiles in case-insensitive alphabetical order. Switching applies
+the new click settings to the **next** session; a session that is already
+running keeps the settings it started with. Invalid profile files are reported
+and skipped while cycling.
+
+Profile names are limited to 32 characters and may contain ASCII letters,
+digits, `-`, and `_` only. `default` is reserved for the click settings in
+`config.toml`. The active profile is not persisted: after a restart MegaClicker
+uses the base configuration unless `--profile` is passed again.
 
 ### Invalid configuration
 
@@ -210,7 +251,7 @@ activity begins.
   spin, so the worker notices a stop within a few milliseconds. Shutdown joins
   the worker before the process exits.
 - **Start delay.** The delay applies once per start, before the first click,
-  and is interruptible by `F6`, `F8`, or `Ctrl+C`.
+  and is interruptible by the toggle hotkey, the quit hotkey, or `Ctrl+C`.
 - **Click limit.** When the configured limit is reached, clicking stops
   automatically and the final count is printed.
 - **Dry-run.** `--dry-run` exercises the same thread, scheduling, stop path, and
@@ -251,10 +292,13 @@ and the target application's message loop dominate at that point.
 - **Windows only.** The MVP targets Windows 10/11 x64 and uses Win32 directly.
 - **Console only.** The console window must stay open; closing it terminates
   MegaClicker. There is no tray icon or GUI.
-- **Function-key hotkeys only.** The toggle and quit hotkeys can be selected from F1–F12, but modifiers and arbitrary keys are not supported.
+- **Function-key hotkeys only.** The toggle, profile, and quit hotkeys can be selected from F1–F12, but modifiers and arbitrary keys are not supported.
 - **Current cursor position.** MegaClicker does not move the cursor. Clicks go
   wherever the pointer currently is.
-- **Config requires restart.** Settings are read once at startup by design.
+- **Base config requires restart.** The base config is read once at startup.
+  Named profiles are re-read whenever they are selected.
+- **Active profile is not persisted.** After a restart MegaClicker uses the base
+  configuration unless `--profile` is passed again.
 - **Elevation / UIPI.** Windows blocks synthetic input sent from a lower
   integrity process to an elevated window. If clicks do not reach an
   administrator window, run both at the same privilege level. MegaClicker
@@ -276,7 +320,8 @@ and the target application's message loop dominate at that point.
 
 - MegaClicker makes **no network connections**, has no telemetry, no crash
   reporting, and no auto-update mechanism.
-- It writes only the config file under `%APPDATA%\MegaClicker`.
+- It writes only the base config file and profile files under
+  `%APPDATA%\MegaClicker`.
 - Synthetic mouse input is sent only while a session is running.
 - `--dry-run` never calls `SendInput`.
 - All `unsafe` Rust is confined to [`src/input.rs`](src/input.rs), which wraps
@@ -291,6 +336,7 @@ src/
   main.rs             startup, wiring, console UI, shutdown
   cli.rs              command-line arguments
   config.rs           load, validate, create defaults, resolve path
+  profile.rs          named profile storage, discovery, cycle selection
   hotkey.rs           configurable global hotkeys, conflict errors, debounce
   engine.rs           click thread, state machine, scheduling, tests
   input.rs            the only unsafe module: Win32 safe wrappers
@@ -307,9 +353,10 @@ cargo test
 cargo build --release
 ```
 
-Unit tests cover configuration parsing and every range error, click-limit
-accounting, debounce behavior, start/stop no-ops, start delay, and a dry-run
-session that reaches its limit.
+Unit tests cover configuration parsing and every range error, hotkey validation,
+profile creation and discovery, profile cycling with broken files, click-limit
+accounting, debounce behavior, start/stop no-ops, start delay, applying a new
+config to the next session, and a dry-run session that reaches its limit.
 
 To measure timing safely without clicking anything:
 
@@ -318,20 +365,24 @@ To measure timing safely without clicking anything:
 ```
 
 Then press `F6` to start and `F6` again to stop. The stop report prints the
-click count, elapsed time, average CPS, and measured stop latency. Press `F8`
-to exit.
+click count, elapsed time, average CPS, and measured stop latency. Press `F7`
+to cycle profiles and `F8` to exit.
 
-## Roadmap (post-MVP)
+## Roadmap
 
-These are intentionally **not** part of the MVP:
+Done:
 
-- Tray icon and settings GUI, with hotkey rebinding
-- Multiple profiles and per-profile config switching
-- Randomized/human-like intervals and cursor movement (with clear disclaimers)
-- Click sequences, multi-point macros, recording/playback
-- Installer, auto-start, updater
-- Localization
-- macOS/Linux support
+- [x] Configurable global hotkeys (`v0.1.1`)
+- [x] Multiple profiles and per-profile config switching (`v0.2.0`)
+
+Planned:
+
+- [ ] Tray icon and settings GUI, with hotkey rebinding
+- [ ] Randomized/human-like intervals and cursor movement (with clear disclaimers)
+- [ ] Click sequences, multi-point macros, recording/playback
+- [ ] Installer, auto-start, updater
+- [ ] Localization
+- [ ] macOS/Linux support
 
 ## License
 

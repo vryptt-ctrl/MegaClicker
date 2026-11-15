@@ -93,6 +93,9 @@ struct WorkerState {
 
 struct Shared {
     state: Mutex<WorkerState>,
+    /// Read once at the start of every session, so a profile switch never
+    /// changes the settings of a session that is already running.
+    config: Mutex<Config>,
     wake: Condvar,
     stop: AtomicBool,
     running: AtomicBool,
@@ -117,6 +120,7 @@ impl Clicker {
                 busy: false,
                 shutdown: false,
             }),
+            config: Mutex::new(config),
             wake: Condvar::new(),
             stop: AtomicBool::new(false),
             running: AtomicBool::new(false),
@@ -129,7 +133,7 @@ impl Clicker {
         let worker_shared = Arc::clone(&shared);
         let handle = thread::Builder::new()
             .name("megaclicker-clicker".to_owned())
-            .spawn(move || worker_loop(worker_shared, config, sink))
+            .spawn(move || worker_loop(worker_shared, sink))
             .map_err(EngineError::Spawn)?;
 
         Ok(Self {
@@ -170,6 +174,12 @@ impl Clicker {
         self.shared.running.store(false, Ordering::SeqCst);
         self.shared.wake.notify_all();
         true
+    }
+
+    /// Replace the settings used by the next session. A running session keeps
+    /// the configuration it started with.
+    pub fn set_config(&self, config: Config) {
+        *lock(&self.shared.config) = config;
     }
 
     pub fn is_running(&self) -> bool {
@@ -216,9 +226,9 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn worker_loop(shared: Arc<Shared>, config: Config, sink: Box<dyn ClickSink>) {
+fn worker_loop(shared: Arc<Shared>, sink: Box<dyn ClickSink>) {
     loop {
-        let session = {
+        let (session, config) = {
             let mut state = lock(&shared.state);
             while !state.busy && !state.shutdown {
                 state = shared
@@ -231,7 +241,7 @@ fn worker_loop(shared: Arc<Shared>, config: Config, sink: Box<dyn ClickSink>) {
                 return;
             }
 
-            shared.session.load(Ordering::SeqCst)
+            (shared.session.load(Ordering::SeqCst), *lock(&shared.config))
         };
 
         let origin = Instant::now();
@@ -385,6 +395,20 @@ pub fn limit_reached(count: u64, limit: u64) -> bool {
 mod tests {
     use super::*;
     use crate::config::HotkeyKey;
+    use std::sync::Mutex as StdMutex;
+
+    /// Records every click so tests can prove which settings were used.
+    struct RecordingSink(Arc<StdMutex<Vec<(Button, ClickType)>>>);
+
+    impl ClickSink for RecordingSink {
+        fn click(&self, button: Button, click_type: ClickType) -> Result<(), String> {
+            self.0
+                .lock()
+                .expect("recording mutex")
+                .push((button, click_type));
+            Ok(())
+        }
+    }
 
     fn test_config(interval_ms: u64, click_limit: u64) -> Config {
         Config {
@@ -393,6 +417,7 @@ mod tests {
             click_type: ClickType::Single,
             toggle_hotkey: HotkeyKey::F6,
             quit_hotkey: HotkeyKey::F8,
+            profile_hotkey: HotkeyKey::F7,
             click_limit,
             start_delay: Duration::ZERO,
         }
@@ -500,6 +525,43 @@ mod tests {
         assert!(
             !clicker.stop(),
             "stopping twice must be a no-op once the stop is recorded"
+        );
+
+        clicker.shutdown();
+    }
+
+    #[test]
+    fn new_config_applies_to_the_next_session_only() {
+        let recorded = Arc::new(StdMutex::new(Vec::new()));
+        let mut clicker = Clicker::spawn(
+            test_config(5, 1),
+            Box::new(RecordingSink(Arc::clone(&recorded))),
+        )
+        .expect("spawn clicker");
+
+        assert!(matches!(clicker.start(), StartOutcome::Started { .. }));
+        clicker
+            .events
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first report");
+
+        let mut next = test_config(5, 1);
+        next.button = Button::Right;
+        next.click_type = ClickType::Double;
+        clicker.set_config(next);
+
+        assert!(matches!(clicker.start(), StartOutcome::Started { .. }));
+        clicker
+            .events
+            .recv_timeout(Duration::from_secs(2))
+            .expect("second report");
+
+        assert_eq!(
+            *recorded.lock().expect("recording mutex"),
+            vec![
+                (Button::Left, ClickType::Single),
+                (Button::Right, ClickType::Double)
+            ]
         );
 
         clicker.shutdown();

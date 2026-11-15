@@ -1,4 +1,4 @@
-//! Fixed global hotkeys for the MVP: F6 toggles clicking, F8 quits.
+//! Global hotkeys: toggle clicking, switch profile, and quit.
 
 use std::io;
 use std::time::{Duration, Instant};
@@ -10,6 +10,7 @@ use crate::input;
 
 pub const TOGGLE_ID: i32 = 1;
 pub const QUIT_ID: i32 = 2;
+pub const PROFILE_ID: i32 = 3;
 
 /// Duplicate toggle presses inside this window are ignored.
 pub const DEBOUNCE: Duration = Duration::from_millis(250);
@@ -20,6 +21,7 @@ const ERROR_HOTKEY_ALREADY_REGISTERED: i32 = 1409;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HotkeyAction {
     Toggle,
+    NextProfile,
     Quit,
 }
 
@@ -36,11 +38,15 @@ pub enum HotkeyError {
     Register { key: &'static str, details: String },
 }
 
-/// Owns the two hotkey registrations and unregisters them on drop.
+/// Owns the three hotkey registrations and unregisters them on drop.
 pub struct Hotkeys;
 
 impl Hotkeys {
-    pub fn register(toggle_key: HotkeyKey, quit_key: HotkeyKey) -> Result<Self, HotkeyError> {
+    pub fn register(
+        toggle_key: HotkeyKey,
+        quit_key: HotkeyKey,
+        profile_key: HotkeyKey,
+    ) -> Result<Self, HotkeyError> {
         if let Err(error) = input::register_hotkey(TOGGLE_ID, toggle_key) {
             return Err(map_error(toggle_key, error));
         }
@@ -50,14 +56,21 @@ impl Hotkeys {
             return Err(map_error(quit_key, error));
         }
 
+        if let Err(error) = input::register_hotkey(PROFILE_ID, profile_key) {
+            let _ = input::unregister_hotkey(TOGGLE_ID);
+            let _ = input::unregister_hotkey(QUIT_ID);
+            return Err(map_error(profile_key, error));
+        }
+
         Ok(Self)
     }
 
-    /// Wait up to `timeout` for the next toggle/quit press.
+    /// Wait up to `timeout` for the next hotkey press.
     pub fn wait_for_event(&self, timeout: Duration) -> Option<HotkeyAction> {
         match input::wait_for_hotkey(timeout)? {
             TOGGLE_ID => Some(HotkeyAction::Toggle),
             QUIT_ID => Some(HotkeyAction::Quit),
+            PROFILE_ID => Some(HotkeyAction::NextProfile),
             _ => None,
         }
     }
@@ -67,6 +80,7 @@ impl Drop for Hotkeys {
     fn drop(&mut self) {
         let _ = input::unregister_hotkey(TOGGLE_ID);
         let _ = input::unregister_hotkey(QUIT_ID);
+        let _ = input::unregister_hotkey(PROFILE_ID);
     }
 }
 
