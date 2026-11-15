@@ -12,6 +12,9 @@ pub const TOGGLE_ID: i32 = 1;
 pub const QUIT_ID: i32 = 2;
 pub const PROFILE_ID: i32 = 3;
 
+/// Hotkey ids in the same order as [`Hotkeys::keys`].
+const HOTKEY_IDS: [i32; 3] = [TOGGLE_ID, QUIT_ID, PROFILE_ID];
+
 /// Duplicate toggle presses inside this window are ignored.
 pub const DEBOUNCE: Duration = Duration::from_millis(250);
 
@@ -30,7 +33,7 @@ pub enum HotkeyError {
     #[error(
         "cannot register {key} as a global hotkey because another application is \
          already using it. Close the application, overlay, or driver that owns \
-         {key}, then start MegaClicker again."
+         {key}, then try again."
     )]
     Conflict { key: &'static str },
 
@@ -39,7 +42,9 @@ pub enum HotkeyError {
 }
 
 /// Owns the three hotkey registrations and unregisters them on drop.
-pub struct Hotkeys;
+pub struct Hotkeys {
+    keys: [HotkeyKey; 3],
+}
 
 impl Hotkeys {
     pub fn register(
@@ -47,22 +52,67 @@ impl Hotkeys {
         quit_key: HotkeyKey,
         profile_key: HotkeyKey,
     ) -> Result<Self, HotkeyError> {
-        if let Err(error) = input::register_hotkey(TOGGLE_ID, toggle_key) {
-            return Err(map_error(toggle_key, error));
+        let keys = [toggle_key, quit_key, profile_key];
+        let mut registered: Vec<i32> = Vec::with_capacity(HOTKEY_IDS.len());
+
+        for (index, key) in keys.iter().enumerate() {
+            match input::register_hotkey(HOTKEY_IDS[index], *key) {
+                Ok(()) => registered.push(HOTKEY_IDS[index]),
+                Err(error) => {
+                    unregister_ids(&registered);
+                    return Err(map_error(*key, error));
+                }
+            }
         }
 
-        if let Err(error) = input::register_hotkey(QUIT_ID, quit_key) {
-            let _ = input::unregister_hotkey(TOGGLE_ID);
-            return Err(map_error(quit_key, error));
+        Ok(Self { keys })
+    }
+
+    /// Keys currently bound, in toggle/quit/profile order.
+    pub const fn keys(&self) -> [HotkeyKey; 3] {
+        self.keys
+    }
+
+    /// Point the three hotkeys at new keys. Keys that do not change keep their
+    /// existing registration. If any new key is unavailable, changed keys are
+    /// best-effort restored to the previous set and the error is returned.
+    pub fn rebind(&mut self, keys: [HotkeyKey; 3]) -> Result<(), HotkeyError> {
+        if keys == self.keys {
+            return Ok(());
         }
 
-        if let Err(error) = input::register_hotkey(PROFILE_ID, profile_key) {
-            let _ = input::unregister_hotkey(TOGGLE_ID);
-            let _ = input::unregister_hotkey(QUIT_ID);
-            return Err(map_error(profile_key, error));
+        let changed: [bool; 3] = std::array::from_fn(|index| keys[index] != self.keys[index]);
+        let mut registered: Vec<i32> = Vec::with_capacity(HOTKEY_IDS.len());
+
+        for (index, id) in HOTKEY_IDS.iter().enumerate() {
+            if changed[index] {
+                let _ = input::unregister_hotkey(*id);
+            }
         }
 
-        Ok(Self)
+        for (index, key) in keys.iter().enumerate() {
+            if !changed[index] {
+                continue;
+            }
+
+            match input::register_hotkey(HOTKEY_IDS[index], *key) {
+                Ok(()) => registered.push(HOTKEY_IDS[index]),
+                Err(error) => {
+                    unregister_ids(&registered);
+                    // The old keys were free moments ago; this is best effort
+                    // because a competing application could take one in between.
+                    for (index, id) in HOTKEY_IDS.iter().enumerate() {
+                        if changed[index] {
+                            let _ = input::register_hotkey(*id, self.keys[index]);
+                        }
+                    }
+                    return Err(map_error(*key, error));
+                }
+            }
+        }
+
+        self.keys = keys;
+        Ok(())
     }
 
     /// Wait up to `timeout` for the next hotkey press.
@@ -78,9 +128,16 @@ impl Hotkeys {
 
 impl Drop for Hotkeys {
     fn drop(&mut self) {
-        let _ = input::unregister_hotkey(TOGGLE_ID);
-        let _ = input::unregister_hotkey(QUIT_ID);
-        let _ = input::unregister_hotkey(PROFILE_ID);
+        for id in HOTKEY_IDS {
+            let _ = input::unregister_hotkey(id);
+        }
+    }
+}
+
+/// Unregister every id a failed registration loop left behind.
+fn unregister_ids(ids: &[i32]) {
+    for id in ids {
+        let _ = input::unregister_hotkey(*id);
     }
 }
 

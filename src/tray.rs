@@ -1,10 +1,9 @@
 //! Native notification-area icon, popup menu, and shell launching.
 //!
-//! This module is the second and last place that contains `unsafe` code. It
-//! owns a hidden top-level window that receives notification-area callbacks and
-//! turns menu selections into events. Events are queued instead of being handled
-//! inside the window procedure, so the main loop stays the only place that
-//! changes clicker state.
+//! This module owns a hidden top-level window that receives notification-area
+//! callbacks and turns menu selections into events. Events are queued instead of
+//! being handled inside the window procedure, so the main loop stays the only
+//! place that changes clicker state.
 //!
 //! Every FFI call is wrapped in a safe Rust API and every `unsafe` block has a
 //! `SAFETY:` comment explaining the invariants it relies on.
@@ -20,21 +19,21 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use thiserror::Error;
 use windows_sys::Win32::Foundation::{
-    GetLastError, ERROR_CLASS_ALREADY_EXISTS, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM,
+    GetLastError, ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, WPARAM,
 };
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Shell::{
     ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
     NOTIFYICONDATAW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DispatchMessageW, GetCursorPos, LoadIconW, PeekMessageW, PostMessageW, RegisterClassW,
-    SetForegroundWindow, TrackPopupMenu, TranslateMessage, IDI_APPLICATION, MF_SEPARATOR,
-    MF_STRING, MSG, PM_REMOVE, SW_SHOWNORMAL, TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, WM_APP, WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_NULL, WM_RBUTTONUP, WNDCLASSW,
-    WS_OVERLAPPEDWINDOW,
+    GetCursorPos, LoadIconW, PostMessageW, RegisterClassW, SetForegroundWindow, TrackPopupMenu,
+    IDI_APPLICATION, MF_SEPARATOR, MF_STRING, SW_SHOWNORMAL, TPM_BOTTOMALIGN, TPM_NONOTIFY,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_NULL,
+    WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
+
+use crate::input::{last_error, module_handle, wide};
 
 const WINDOW_CLASS: &str = "MegaClickerTrayWindow";
 const WINDOW_TITLE: &str = "MegaClicker";
@@ -47,7 +46,8 @@ const MENU_TOGGLE: usize = 1;
 const MENU_NEXT_PROFILE: usize = 2;
 const MENU_OPEN_CONFIG: usize = 3;
 const MENU_OPEN_PROFILES: usize = 4;
-const MENU_QUIT: usize = 5;
+const MENU_SETTINGS: usize = 5;
+const MENU_QUIT: usize = 6;
 
 /// Actions requested from the tray icon. The main loop drains these and performs
 /// the same work as the matching hotkey.
@@ -57,6 +57,7 @@ pub enum TrayEvent {
     NextProfile,
     OpenConfig,
     OpenProfiles,
+    Settings,
     Quit,
 }
 
@@ -195,32 +196,6 @@ impl Tray {
         Ok(Self { hwnd, data })
     }
 
-    /// Dispatch every pending message for this icon's window.
-    ///
-    /// Messages for other windows and thread-wide messages such as `WM_HOTKEY`
-    /// are deliberately left in the queue.
-    pub fn pump(&self) {
-        let mut message = MSG::default();
-
-        loop {
-            // SAFETY: `message` is a writable MSG. Restricting the query to
-            // `self.hwnd` leaves thread messages (including WM_HOTKEY) in the
-            // queue for the hotkey wait path.
-            let has_message = unsafe { PeekMessageW(&mut message, self.hwnd, 0, 0, PM_REMOVE) };
-            if has_message == 0 {
-                break;
-            }
-
-            // SAFETY: `message` was filled by PeekMessageW and still refers to
-            // our live window. Translating and dispatching it is the documented
-            // pump sequence.
-            unsafe {
-                TranslateMessage(&message);
-                DispatchMessageW(&message);
-            }
-        }
-    }
-
     /// Pop the next event produced by a tray interaction.
     pub fn try_recv(&self) -> Option<TrayEvent> {
         pending_events().pop_front()
@@ -271,19 +246,6 @@ pub fn open_path(path: &Path) -> io::Result<()> {
     }
 }
 
-fn module_handle() -> HINSTANCE {
-    // SAFETY: A null module name requests the executable's module handle, which
-    // exists for the lifetime of the process.
-    unsafe { GetModuleHandleW(ptr::null()) }
-}
-
-fn wide(value: &str) -> Vec<u16> {
-    OsStr::new(value)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
-}
-
 fn fill_tooltip(buffer: &mut [u16; 128], text: &str) {
     let encoded: Vec<u16> = OsStr::new(text)
         .encode_wide()
@@ -294,18 +256,10 @@ fn fill_tooltip(buffer: &mut [u16; 128], text: &str) {
     buffer[encoded.len()] = 0;
 }
 
-fn last_error(fallback: &str) -> io::Error {
-    let error = io::Error::last_os_error();
-    if error.raw_os_error().unwrap_or(0) == 0 {
-        io::Error::other(fallback.to_owned())
-    } else {
-        error
-    }
-}
-
 fn show_menu(hwnd: HWND) {
     let toggle = wide("Start / stop clicking");
     let next_profile = wide("Next profile");
+    let settings = wide("Settings...");
     let open_config = wide("Open config");
     let open_profiles = wide("Open profiles folder");
     let quit = wide("Exit");
@@ -323,6 +277,7 @@ fn show_menu(hwnd: HWND) {
         AppendMenuW(menu, MF_STRING, MENU_TOGGLE, toggle.as_ptr());
         AppendMenuW(menu, MF_STRING, MENU_NEXT_PROFILE, next_profile.as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
+        AppendMenuW(menu, MF_STRING, MENU_SETTINGS, settings.as_ptr());
         AppendMenuW(menu, MF_STRING, MENU_OPEN_CONFIG, open_config.as_ptr());
         AppendMenuW(menu, MF_STRING, MENU_OPEN_PROFILES, open_profiles.as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
@@ -370,6 +325,7 @@ fn show_menu(hwnd: HWND) {
         MENU_NEXT_PROFILE => push_event(TrayEvent::NextProfile),
         MENU_OPEN_CONFIG => push_event(TrayEvent::OpenConfig),
         MENU_OPEN_PROFILES => push_event(TrayEvent::OpenProfiles),
+        MENU_SETTINGS => push_event(TrayEvent::Settings),
         MENU_QUIT => push_event(TrayEvent::Quit),
         _ => {}
     }
@@ -391,7 +347,7 @@ unsafe extern "system" fn window_proc(
             // working.
             match (lparam as u32) & 0xffff {
                 WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(hwnd),
-                WM_LBUTTONDBLCLK => push_event(TrayEvent::OpenConfig),
+                WM_LBUTTONDBLCLK => push_event(TrayEvent::Settings),
                 _ => {}
             }
             0

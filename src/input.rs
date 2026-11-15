@@ -1,14 +1,16 @@
 //! Win32 input, hotkey, and process-wide lock wrappers.
 //!
-//! MegaClicker needs four small Win32 surfaces:
+//! MegaClicker needs five small Win32 surfaces:
 //! * `SendInput` for synthetic mouse clicks,
 //! * `RegisterHotKey`/`UnregisterHotKey` for global hotkeys,
 //! * the thread message queue for `WM_HOTKEY` delivery,
+//! * a message pump for the tray and settings windows,
 //! * a named mutex for single-instance enforcement.
 //!
 //! Every FFI call is wrapped in a safe Rust API and every `unsafe` block has a
 //! `SAFETY:` comment explaining the invariants it relies on. The notification
-//! area wrapper lives in `tray.rs`, the only other module with `unsafe` code.
+//! area wrapper lives in `tray.rs` and the settings window in `gui.rs`, the only
+//! other modules with `unsafe` code.
 
 use std::ffi::OsStr;
 use std::io;
@@ -20,9 +22,10 @@ use std::time::Duration;
 
 use thiserror::Error;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, HANDLE,
+    CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, HANDLE, HINSTANCE,
 };
 use windows_sys::Win32::System::Console::{SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_C_EVENT};
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, SendInput, UnregisterHotKey, INPUT, INPUT_0, INPUT_MOUSE, MOD_NOREPEAT,
@@ -31,7 +34,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     VK_F11, VK_F12, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    MsgWaitForMultipleObjectsEx, PeekMessageW, MSG, PM_REMOVE, QS_ALLINPUT, WM_HOTKEY,
+    DispatchMessageW, MsgWaitForMultipleObjectsEx, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+    QS_ALLINPUT, WM_HOTKEY,
 };
 
 use crate::config::{Button, ClickType, HotkeyKey};
@@ -171,8 +175,9 @@ pub fn unregister_hotkey(id: i32) -> io::Result<()> {
 ///
 /// This uses `MsgWaitForMultipleObjectsEx` so the thread sleeps instead of
 /// polling. `QS_ALLINPUT` wakes the call as soon as any message is queued,
-/// including the notification-area callbacks that `tray::Tray::pump` dispatches.
-/// Only `WM_HOTKEY` is removed here; every other message stays queued.
+/// including the messages that [`pump_messages`] dispatches for the tray and
+/// settings windows. Only `WM_HOTKEY` is removed here; every other message
+/// stays queued.
 pub fn wait_for_hotkey(timeout: Duration) -> Option<i32> {
     let milliseconds = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
 
@@ -203,6 +208,47 @@ pub fn wait_for_hotkey(timeout: Duration) -> Option<i32> {
     }
 
     i32::try_from(message.wParam).ok()
+}
+
+/// Upper bound on messages dispatched per call so a chatty window cannot starve
+/// the clicker loop. Remaining messages are handled on the next pass.
+const MAX_MESSAGES_PER_PUMP: usize = 64;
+
+/// Dispatch queued window messages for this thread, leaving `WM_HOTKEY` in the
+/// queue for [`wait_for_hotkey`].
+///
+/// The tray icon and the settings window both receive messages here, so the main
+/// loop must call this regularly. Dispatching never blocks: a menu is only shown
+/// while the user interacts with it, which happens inside `Tray`.
+pub fn pump_messages() {
+    let mut message = MSG::default();
+    let mut handled = 0;
+
+    while handled < MAX_MESSAGES_PER_PUMP {
+        // SAFETY: `message` is a valid writable MSG and a null hwnd selects the
+        // current thread's queue. The two ranges deliberately skip WM_HOTKEY so
+        // hotkey delivery stays with `wait_for_hotkey`.
+        let mut found = false;
+        for (low, high) in [(0, WM_HOTKEY - 1), (WM_HOTKEY + 1, u32::MAX)] {
+            if unsafe { PeekMessageW(&mut message, ptr::null_mut(), low, high, PM_REMOVE) } != 0 {
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            break;
+        }
+
+        // SAFETY: `message` was filled in by a successful PeekMessageW and is
+        // dispatched exactly once, which is the documented pump sequence.
+        unsafe {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+
+        handled += 1;
+    }
 }
 
 static CTRL_C_PRESSED: AtomicBool = AtomicBool::new(false);
@@ -301,4 +347,28 @@ impl Drop for NamedMutex {
             }
         }
     }
+}
+
+/// Encode a Rust string as a NUL-terminated UTF-16 buffer for the `W` APIs.
+pub(crate) fn wide(value: &str) -> Vec<u16> {
+    OsStr::new(value)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+/// Last Win32 error, or `fallback` when Windows reported no error code.
+pub(crate) fn last_error(fallback: &str) -> io::Error {
+    let error = io::Error::last_os_error();
+    if error.raw_os_error().unwrap_or(0) == 0 {
+        io::Error::other(fallback.to_owned())
+    } else {
+        error
+    }
+}
+
+pub(crate) fn module_handle() -> HINSTANCE {
+    // SAFETY: A null module name requests the executable's module handle, which
+    // exists for the lifetime of the process.
+    unsafe { GetModuleHandleW(ptr::null()) }
 }

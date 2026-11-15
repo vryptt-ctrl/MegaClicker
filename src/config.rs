@@ -4,9 +4,10 @@
 //! concrete TOML key and its valid range.
 
 use std::env;
-use std::fs;
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -21,6 +22,8 @@ pub const DEFAULT_INTERVAL_MS: u64 = 100;
 pub const MAX_INTERVAL_MS: u64 = 1_000;
 pub const MAX_CLICK_LIMIT: u64 = 1_000_000_000;
 pub const MAX_START_DELAY_SECONDS: u64 = 5;
+
+static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 const INTERVAL_EXPECTED: &str = "an integer from 1 to 1000 (milliseconds)";
 const LIMIT_EXPECTED: &str = "an integer from 0 to 1000000000 (0 = unlimited)";
@@ -37,6 +40,9 @@ pub enum Button {
 }
 
 impl Button {
+    /// Every valid button, in the order the settings window lists them.
+    pub const ALL: [Self; 3] = [Self::Left, Self::Right, Self::Middle];
+
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Left => "left",
@@ -69,6 +75,9 @@ pub enum ClickType {
 }
 
 impl ClickType {
+    /// Every valid click type, in the order the settings window lists them.
+    pub const ALL: [Self; 2] = [Self::Single, Self::Double];
+
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Single => "single",
@@ -108,6 +117,22 @@ pub enum HotkeyKey {
 }
 
 impl HotkeyKey {
+    /// Every valid hotkey, in the order the settings window lists them.
+    pub const ALL: [Self; 12] = [
+        Self::F1,
+        Self::F2,
+        Self::F3,
+        Self::F4,
+        Self::F5,
+        Self::F6,
+        Self::F7,
+        Self::F8,
+        Self::F9,
+        Self::F10,
+        Self::F11,
+        Self::F12,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::F1 => "F1",
@@ -202,6 +227,20 @@ impl Default for Config {
     }
 }
 
+/// Values collected from the settings window before validation. Numbers stay
+/// signed here so negative input produces a normal range error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigFields {
+    pub interval_ms: i64,
+    pub button: Button,
+    pub click_type: ClickType,
+    pub click_limit: i64,
+    pub start_delay_seconds: i64,
+    pub toggle_hotkey: HotkeyKey,
+    pub quit_hotkey: HotkeyKey,
+    pub profile_hotkey: HotkeyKey,
+}
+
 /// Result of loading a config, including whether the file was created.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Loaded {
@@ -235,7 +274,7 @@ pub enum ConfigError {
         source: io::Error,
     },
 
-    #[error("could not write the default config file: {source}")]
+    #[error("could not write the config file: {source}")]
     Write {
         #[source]
         source: io::Error,
@@ -369,6 +408,81 @@ impl Config {
             click_limit: settings.click_limit,
             start_delay: settings.start_delay,
         })
+    }
+
+    /// Validate values collected from the settings window. This is the only
+    /// path the GUI uses, so typed input is held to the same rules as TOML.
+    pub fn from_fields(fields: &ConfigFields) -> Result<Self, ConfigError> {
+        let settings = validate_click_settings(
+            fields.interval_ms,
+            fields.button.as_str(),
+            fields.click_type.as_str(),
+            fields.click_limit,
+            fields.start_delay_seconds,
+        )?;
+
+        validate_hotkeys(
+            (fields.toggle_hotkey, fields.toggle_hotkey.as_str()),
+            (fields.quit_hotkey, fields.quit_hotkey.as_str()),
+            (fields.profile_hotkey, fields.profile_hotkey.as_str()),
+        )?;
+
+        Ok(Self {
+            interval: settings.interval,
+            button: settings.button,
+            click_type: settings.click_type,
+            toggle_hotkey: fields.toggle_hotkey,
+            quit_hotkey: fields.quit_hotkey,
+            profile_hotkey: fields.profile_hotkey,
+            click_limit: settings.click_limit,
+            start_delay: settings.start_delay,
+        })
+    }
+
+    /// Render this config as the commented TOML file users edit by hand. The
+    /// settings window writes this format so the file stays self-documenting.
+    pub fn to_toml(self) -> String {
+        format!(
+            "# MegaClicker configuration.\n\
+             #\n\
+             # This file is read once at startup. Restart MegaClicker after editing it.\n\
+             # Invalid values stop startup with an error that names the field and its range.\n\
+             \n\
+             # Time between the start of consecutive clicks, in milliseconds.\n\
+             # Allowed: 1-1000\n\
+             interval_ms = {interval_ms}\n\
+             \n\
+             # Mouse button to click.\n\
+             # Allowed: \"left\", \"right\", \"middle\"\n\
+             button = \"{button}\"\n\
+             \n\
+             # Click type. \"double\" sends two rapid button presses per click action and\n\
+             # still counts as ONE click action towards click_limit.\n\
+             # Allowed: \"single\", \"double\"\n\
+             click_type = \"{click_type}\"\n\
+             \n\
+             # Global function keys. They must all be different from each other.\n\
+             # Allowed: \"F1\" through \"F12\"\n\
+             toggle_hotkey = \"{toggle_hotkey}\"\n\
+             quit_hotkey = \"{quit_hotkey}\"\n\
+             profile_hotkey = \"{profile_hotkey}\"\n\
+             \n\
+             # Stop automatically after this many click actions. 0 means unlimited.\n\
+             # Allowed: 0-1000000000\n\
+             click_limit = {click_limit}\n\
+             \n\
+             # Delay before the first click after each start, in seconds.\n\
+             # Allowed: 0-5\n\
+             start_delay_seconds = {start_delay_seconds}\n",
+            interval_ms = self.interval.as_millis(),
+            button = self.button.as_str(),
+            click_type = self.click_type.as_str(),
+            toggle_hotkey = self.toggle_hotkey.as_str(),
+            quit_hotkey = self.quit_hotkey.as_str(),
+            profile_hotkey = self.profile_hotkey.as_str(),
+            click_limit = self.click_limit,
+            start_delay_seconds = self.start_delay.as_secs(),
+        )
     }
 
     /// Replace every click setting while keeping the hotkeys unchanged.
@@ -533,6 +647,96 @@ pub fn load_or_create(path: &Path) -> Result<Loaded, ConfigError> {
         config: Config::from_toml(DEFAULT_CONFIG_TOML)?,
         created: true,
     })
+}
+
+/// Write a config back to disk, replacing the previous contents atomically.
+/// Used by the settings window so a write error cannot leave a truncated config.
+pub fn save(path: &Path, config: &Config) -> Result<(), ConfigError> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|source| ConfigError::CreateDir { source })?;
+        }
+    }
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    let directory = parent.unwrap_or_else(|| Path::new("."));
+    for _ in 0..16 {
+        let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let temp_path = directory.join(format!(".megaclicker-{}-{id}.tmp", std::process::id()));
+        let mut temp_file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(source) => return Err(ConfigError::Write { source }),
+        };
+
+        let write_result = temp_file
+            .write_all(config.to_toml().as_bytes())
+            .and_then(|()| temp_file.sync_all());
+        drop(temp_file);
+
+        if let Err(source) = write_result {
+            let _ = fs::remove_file(&temp_path);
+            return Err(ConfigError::Write { source });
+        }
+
+        match replace_file(&temp_path, path) {
+            Ok(()) => return Ok(()),
+            Err(source) => {
+                let _ = fs::remove_file(&temp_path);
+                return Err(ConfigError::Write { source });
+            }
+        }
+    }
+
+    Err(ConfigError::Write {
+        source: io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not allocate a unique temporary config file",
+        ),
+    })
+}
+
+#[cfg(windows)]
+fn replace_file(temp_path: &Path, path: &Path) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source = wide_path(temp_path);
+    let destination = wide_path(path);
+
+    // SAFETY: Both paths are NUL-terminated UTF-16 buffers that live through
+    // the call. The flags request replacement of an existing file and a
+    // completed disk write before the API returns.
+    let replaced = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+
+    if replaced == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn wide_path(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
+    path.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 #[cfg(test)]
@@ -735,5 +939,165 @@ mod tests {
     fn rejects_invalid_toml_syntax() {
         let error = parse("interval_ms = [").expect_err("bad TOML must fail");
         assert!(error.to_string().contains("invalid TOML"));
+    }
+
+    #[test]
+    fn renders_defaults_like_the_committed_example() {
+        assert_eq!(Config::default().to_toml(), DEFAULT_CONFIG_TOML);
+    }
+
+    #[test]
+    fn to_toml_round_trips_every_field() {
+        let config = Config {
+            interval: Duration::from_millis(37),
+            button: Button::Middle,
+            click_type: ClickType::Double,
+            toggle_hotkey: HotkeyKey::F1,
+            quit_hotkey: HotkeyKey::F11,
+            profile_hotkey: HotkeyKey::F2,
+            click_limit: 250,
+            start_delay: Duration::from_secs(3),
+        };
+
+        let reparsed = parse(&config.to_toml()).expect("rendered TOML must parse");
+        assert_eq!(reparsed, config);
+    }
+
+    #[test]
+    fn from_fields_accepts_valid_values() {
+        let fields = ConfigFields {
+            interval_ms: 25,
+            button: Button::Right,
+            click_type: ClickType::Double,
+            click_limit: 10,
+            start_delay_seconds: 2,
+            toggle_hotkey: HotkeyKey::F9,
+            quit_hotkey: HotkeyKey::F10,
+            profile_hotkey: HotkeyKey::F11,
+        };
+
+        let config = Config::from_fields(&fields).expect("valid fields must be accepted");
+        assert_eq!(
+            config,
+            Config {
+                interval: Duration::from_millis(25),
+                button: Button::Right,
+                click_type: ClickType::Double,
+                click_limit: 10,
+                start_delay: Duration::from_secs(2),
+                toggle_hotkey: HotkeyKey::F9,
+                quit_hotkey: HotkeyKey::F10,
+                profile_hotkey: HotkeyKey::F11,
+            }
+        );
+    }
+
+    #[test]
+    fn from_fields_accepts_negative_zero() {
+        let fields = ConfigFields {
+            interval_ms: 100,
+            button: Button::Left,
+            click_type: ClickType::Single,
+            click_limit: -0,
+            start_delay_seconds: -0,
+            toggle_hotkey: HotkeyKey::F6,
+            quit_hotkey: HotkeyKey::F8,
+            profile_hotkey: HotkeyKey::F7,
+        };
+
+        let config = Config::from_fields(&fields).expect("signed zero is zero");
+        assert_eq!(config.click_limit, 0);
+        assert_eq!(config.start_delay, Duration::ZERO);
+    }
+
+    #[test]
+    fn from_fields_rejects_out_of_range_and_duplicate_values() {
+        let valid = ConfigFields {
+            interval_ms: 100,
+            button: Button::Left,
+            click_type: ClickType::Single,
+            click_limit: 0,
+            start_delay_seconds: 0,
+            toggle_hotkey: HotkeyKey::F6,
+            quit_hotkey: HotkeyKey::F8,
+            profile_hotkey: HotkeyKey::F7,
+        };
+
+        for (fields, field) in [
+            (
+                ConfigFields {
+                    interval_ms: -1,
+                    ..valid
+                },
+                "interval_ms",
+            ),
+            (
+                ConfigFields {
+                    interval_ms: 1001,
+                    ..valid
+                },
+                "interval_ms",
+            ),
+            (
+                ConfigFields {
+                    click_limit: -1,
+                    ..valid
+                },
+                "click_limit",
+            ),
+            (
+                ConfigFields {
+                    start_delay_seconds: 6,
+                    ..valid
+                },
+                "start_delay_seconds",
+            ),
+            (
+                ConfigFields {
+                    quit_hotkey: HotkeyKey::F6,
+                    ..valid
+                },
+                "quit_hotkey",
+            ),
+            (
+                ConfigFields {
+                    profile_hotkey: HotkeyKey::F8,
+                    ..valid
+                },
+                "profile_hotkey",
+            ),
+        ] {
+            let error = Config::from_fields(&fields).expect_err("invalid fields must fail");
+            assert!(
+                error.to_string().contains(field),
+                "expected {field} in: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn save_writes_a_file_that_loads_back() {
+        let directory = std::env::temp_dir().join(format!(
+            "megaclicker-config-save-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&directory).expect("create temp directory");
+        let path = directory.join("nested").join("config.toml");
+
+        let config = Config {
+            interval: Duration::from_millis(250),
+            ..Config::default()
+        };
+        save(&path, &Config::default()).expect("save initial config");
+        save(&path, &config).expect("replace saved config");
+
+        assert_eq!(load(&path).expect("reload saved config"), config);
+        assert_eq!(
+            fs::read_to_string(&path).expect("read back"),
+            config.to_toml()
+        );
+
+        fs::remove_dir_all(&directory).expect("clean up temp directory");
     }
 }

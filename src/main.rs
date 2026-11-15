@@ -6,6 +6,7 @@ compile_error!("MegaClicker supports Windows 10/11 x64 only.");
 mod cli;
 mod config;
 mod engine;
+mod gui;
 mod hotkey;
 mod input;
 mod profile;
@@ -22,6 +23,7 @@ use clap::Parser;
 use crate::cli::Cli;
 use crate::config::{Button, ClickType, Config};
 use crate::engine::{ClickSink, Clicker, SessionReport, StartOutcome, StopReason};
+use crate::gui::{Settings, SettingsEvent};
 use crate::hotkey::{HotkeyAction, HotkeyError, Hotkeys};
 use crate::single_instance::InstanceError;
 use crate::tray::{Tray, TrayEvent};
@@ -71,7 +73,7 @@ fn run() -> anyhow::Result<ExitCode> {
         None => config::default_path().context("cannot determine the default config path")?,
     };
 
-    let loaded = if cli.config.is_some() {
+    let mut loaded = if cli.config.is_some() {
         let config = config::load(&config_path)
             .with_context(|| format!("config file: {}", config_path.display()))?;
         config::Loaded {
@@ -119,7 +121,7 @@ fn run() -> anyhow::Result<ExitCode> {
         cli.dry_run,
     );
 
-    let hotkeys = match Hotkeys::register(
+    let mut hotkeys = match Hotkeys::register(
         active_config.toggle_hotkey,
         active_config.quit_hotkey,
         active_config.profile_hotkey,
@@ -151,34 +153,43 @@ fn run() -> anyhow::Result<ExitCode> {
         "Ready. Press {} to start or stop, {} to switch profile, {} to quit.",
         active_config.toggle_hotkey, active_config.profile_hotkey, active_config.quit_hotkey
     );
+    if tray.is_some() {
+        println!("Tray icon: double-click (or Settings...) opens the settings window.");
+    }
+
+    let mut settings: Option<Settings> = None;
 
     event_loop(
-        &hotkeys,
+        &mut hotkeys,
         &clicker,
-        &loaded.config,
+        &mut loaded.config,
         &config_path,
         &profile_name,
         active_config,
         tray.as_ref(),
+        &mut settings,
     );
 
     println!("[exit] shutting down...");
     clicker.shutdown();
     let final_count = clicker.count();
     drop(hotkeys);
+    drop(settings);
     println!("[exit] stopped. Final click count: {final_count}.");
 
     Ok(ExitCode::SUCCESS)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn event_loop(
-    hotkeys: &Hotkeys,
+    hotkeys: &mut Hotkeys,
     clicker: &Clicker,
-    base_config: &Config,
+    base_config: &mut Config,
     config_path: &Path,
     initial_profile: &str,
     initial_config: Config,
     tray: Option<&Tray>,
+    settings: &mut Option<Settings>,
 ) {
     let mut active_profile = initial_profile.to_owned();
     let mut active_config = initial_config;
@@ -193,8 +204,11 @@ fn event_loop(
             break;
         }
 
+        // Dispatches tray and settings-window messages; WM_HOTKEY stays queued
+        // for the wait call below.
+        input::pump_messages();
+
         if let Some(tray) = tray {
-            tray.pump();
             while let Some(event) = tray.try_recv() {
                 match event {
                     TrayEvent::Toggle => toggle_clicking(
@@ -215,6 +229,9 @@ fn event_loop(
                     ),
                     TrayEvent::OpenConfig => open_with_shell(config_path),
                     TrayEvent::OpenProfiles => open_profiles_folder(config_path),
+                    TrayEvent::Settings => {
+                        open_settings(clicker, base_config, config_path, &active_profile, settings)
+                    }
                     TrayEvent::Quit => {
                         println!("[quit] tray menu.");
                         break 'outer;
@@ -223,6 +240,25 @@ fn event_loop(
             }
         }
 
+        if let Some(window) = settings.as_ref() {
+            while let Some(event) = window.try_recv() {
+                match event {
+                    SettingsEvent::Saved(new_config) => apply_settings(
+                        clicker,
+                        hotkeys,
+                        base_config,
+                        &active_profile,
+                        &mut active_config,
+                        config_path,
+                        window,
+                        new_config,
+                    ),
+                    SettingsEvent::Closed => {}
+                }
+            }
+        }
+
+        let previous_keys = hotkeys.keys();
         if let Some(action) = hotkeys.wait_for_event(EVENT_POLL_INTERVAL) {
             match action {
                 HotkeyAction::Toggle => {
@@ -232,7 +268,7 @@ fn event_loop(
                     }
                     last_toggle = Some(now);
 
-                    let source = active_config.toggle_hotkey.as_str();
+                    let source = previous_keys[0].as_str();
                     toggle_clicking(
                         clicker,
                         &active_profile,
@@ -320,6 +356,113 @@ fn open_profiles_folder(config_path: &Path) {
     match std::fs::create_dir_all(&directory) {
         Ok(()) => open_with_shell(&directory),
         Err(error) => println!("[warn] could not create {}: {error}", directory.display()),
+    }
+}
+
+/// Open the settings window, creating it the first time it is needed. The
+/// window always edits `config.toml`, so a running session is stopped first.
+fn open_settings(
+    clicker: &Clicker,
+    base_config: &Config,
+    config_path: &Path,
+    active_profile: &str,
+    settings: &mut Option<Settings>,
+) {
+    if settings.is_none() {
+        match Settings::install() {
+            Ok(window) => *settings = Some(window),
+            Err(error) => {
+                eprintln!("[error] {error}");
+                return;
+            }
+        }
+    }
+
+    let Some(window) = settings.as_ref() else {
+        return;
+    };
+
+    if clicker.is_running() && clicker.stop() {
+        println!("[settings] stopping the running session so clicks do not land in the window.");
+    }
+
+    window.open(base_config);
+
+    println!("[settings] editing {}", config_path.display());
+    if !active_profile.eq_ignore_ascii_case(profile::DEFAULT_PROFILE) {
+        println!(
+            "[settings] profile `{active_profile}` is active; its click settings stay in \
+             effect and only the hotkeys change immediately."
+        );
+    }
+}
+
+/// Apply values saved from the settings window: rebind hotkeys, write the file,
+/// then update the live state. Nothing is committed if any step fails, and the
+/// window stays open so the user can fix the problem.
+#[allow(clippy::too_many_arguments)]
+fn apply_settings(
+    clicker: &Clicker,
+    hotkeys: &mut Hotkeys,
+    base_config: &mut Config,
+    active_profile: &str,
+    active_config: &mut Config,
+    config_path: &Path,
+    window: &Settings,
+    new_config: Config,
+) {
+    let previous_keys = hotkeys.keys();
+    let new_keys = [
+        new_config.toggle_hotkey,
+        new_config.quit_hotkey,
+        new_config.profile_hotkey,
+    ];
+
+    if let Err(error) = hotkeys.rebind(new_keys) {
+        window.show_error(&format!("{error}\n\nHotkeys were left unchanged."));
+        return;
+    }
+
+    if let Err(error) = config::save(config_path, &new_config) {
+        if let Err(rollback) = hotkeys.rebind(previous_keys) {
+            eprintln!("[error] could not restore the previous hotkeys: {rollback}");
+        }
+        window.show_error(&format!(
+            "{error}\n\nHotkeys were left unchanged and nothing was saved."
+        ));
+        return;
+    }
+
+    *base_config = new_config;
+
+    let default_profile = active_profile.eq_ignore_ascii_case(profile::DEFAULT_PROFILE);
+    if default_profile {
+        *active_config = new_config;
+    } else {
+        // A named profile owns its click settings, so only the hotkeys change.
+        *active_config = Config {
+            toggle_hotkey: new_config.toggle_hotkey,
+            quit_hotkey: new_config.quit_hotkey,
+            profile_hotkey: new_config.profile_hotkey,
+            ..*active_config
+        };
+    }
+    clicker.set_config(*active_config);
+    window.hide();
+
+    println!("[settings] saved {}", config_path.display());
+    println!("[settings] {}", settings_summary(active_config));
+    println!(
+        "[settings] hotkeys: {} = start/stop | {} = next profile | {} = quit",
+        active_config.toggle_hotkey, active_config.profile_hotkey, active_config.quit_hotkey
+    );
+    if !default_profile {
+        println!(
+            "[settings] profile `{active_profile}` keeps its own click settings; \
+             they apply to the next session."
+        );
+    } else if clicker.is_running() {
+        println!("[settings] the running session keeps its settings.");
     }
 }
 

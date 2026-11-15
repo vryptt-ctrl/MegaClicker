@@ -1,9 +1,9 @@
 # MegaClicker
 
 A very light but very powerful auto clicker for **Windows 10/11 x64**, written
-in Rust. MegaClicker runs in a console with a small notification-area icon, uses
-fixed global hotkeys, and keeps all behavior in one small TOML file. It has no
-settings window, no network access, and no telemetry.
+in Rust. MegaClicker runs in a console with a small notification-area icon and a
+native settings window, uses configurable global hotkeys, and keeps all behavior
+in one small TOML file. It has no network access and no telemetry.
 
 ## What it is
 
@@ -13,8 +13,10 @@ needed for that is included; everything else is deliberately left out.
 
 - Configurable global function keys start/stop clicking, switch profiles, and quit, even when another window is focused. Defaults are `F6`, `F7`, and `F8`.
 - Named profiles store alternate click settings in separate TOML files and can be switched at runtime with `F7`.
-- A tray icon mirrors the hotkeys: start/stop, switch profile, open the config or
+- A tray icon mirrors the hotkeys: start/stop, switch profile, open settings, open the config or
   profiles folder, and exit.
+- A native settings window edits every click setting and rebinds all three hotkeys without
+  touching the TOML file by hand.
 - `Ctrl+C` also quits cleanly, stopping the click thread.
 - Interval, mouse button, single/double click, click limit, and start delay are
   configurable in `%APPDATA%\MegaClicker\config.toml`.
@@ -25,7 +27,7 @@ needed for that is included; everything else is deliberately left out.
 
 ### Not in the MVP
 
-No settings GUI, randomized intervals, cursor movement,
+No randomized intervals, cursor movement,
 click sequences, recording/playback, scheduler, installer, auto-start,
 updater, localization, analytics, crash reporting,
 network features, or non-Windows builds.
@@ -108,17 +110,58 @@ MegaClicker adds a notification-area icon while it runs. Right-click it for:
 | --- | --- |
 | Start / stop clicking | Same as the toggle hotkey. |
 | Next profile | Same as the profile hotkey. |
+| Settings... | Opens the settings window. |
 | Open config | Opens `config.toml` in the default editor. |
 | Open profiles folder | Opens the `profiles` folder, creating it if needed. |
 | Exit | Quits MegaClicker cleanly. |
 
-Double-clicking the icon opens the config file. If the shell refuses to add the
-icon, MegaClicker prints a warning and continues console-only.
+Double-clicking the icon also opens the settings window. If the shell refuses to
+add the icon, MegaClicker prints a warning and continues console-only; the
+settings window can only be opened from the tray icon, so edit `config.toml` by
+hand in that case.
+
+### Settings window
+
+The settings window is a native Win32 dialog-sized window created on first use
+and reused afterwards, so it adds nothing to startup. It has no dependencies and
+no resizable layout: one row per setting, three hotkey drop-downs listing `F1`
+through `F12`, and Save/Cancel buttons.
+
+| Control | Edits |
+| --- | --- |
+| Interval (ms) | `interval_ms` |
+| Mouse button | `button` |
+| Click type | `click_type` |
+| Click limit (0 = unlimited) | `click_limit` |
+| Start delay (s) | `start_delay_seconds` |
+| Toggle / Quit / Profile hotkey | `toggle_hotkey`, `quit_hotkey`, `profile_hotkey` |
+
+What Save does, in order:
+
+1. Validates every field with the same rules as the TOML loader. Invalid input
+   shows an error box naming the field and its range, and the window stays open
+   with your edits intact.
+2. Rebinds the global hotkeys. If another application owns a chosen key, an
+   error box explains which key is unavailable, the previous hotkeys keep
+   working, and nothing is written.
+3. Writes all values back to `config.toml` using the same commented layout as
+   the first-run file, so the file stays hand-editable. The file is replaced
+   atomically. If writing fails, the hotkeys are restored to their previous keys.
+4. Closes the window and prints the new settings and hotkeys to the console.
+
+The window always edits `config.toml`, which is the `default` profile. When a
+named profile is active, its click settings stay in effect and only the hotkeys
+change immediately; the saved click settings apply the next time the `default`
+profile is used. Opening the window stops a running session so the clicks do not
+land on the settings window itself.
+
+If the config file was loaded with `--config`, that file is the one the settings
+window writes to.
 
 ### Startup output
 
 ```text
-MegaClicker 0.3.0 - lightweight auto clicker for Windows
+MegaClicker 0.4.0 - lightweight auto clicker for Windows
 Config: C:\Users\you\AppData\Roaming\MegaClicker\config.toml (created with defaults)
 Profile: default (click settings from config.toml)
   interval_ms         = 100
@@ -132,6 +175,7 @@ Profile: default (click settings from config.toml)
 Mode: live (clicks are sent at the current cursor position)
 Hotkeys: F6 = start/stop | F7 = next profile | F8 = quit | Ctrl+C = quit
 Ready. Press F6 to start or stop, F7 to switch profile, F8 to quit.
+Tray icon: double-click (or Settings...) opens the settings window.
 ```
 
 While running, MegaClicker prints the start settings, a status line every five
@@ -163,8 +207,10 @@ that document every setting and its valid range. The committed
 written on first run.
 
 The config is read **once at startup**. Editing it while MegaClicker is running
-has no effect; restart MegaClicker to apply changes. Delete the file and run
-MegaClicker again to regenerate the defaults.
+has no effect; restart MegaClicker to apply changes. The settings window is the
+exception: it rewrites this file and keeps the file, the hotkeys, and the next
+session in sync. Delete the file and run MegaClicker again to regenerate the
+defaults.
 
 `--config <PATH>` reads an existing file instead of the default. It does not
 auto-create a missing file.
@@ -288,12 +334,14 @@ from the MVP specification.
 | Stop latency from `F6` | < 50 ms | 2.64 ms |
 | Idle CPU | < 0.5% | 0.00% of one core (below timer resolution) |
 | Clicking CPU at 50 CPS | < 5% | 0.00% of one core (below timer resolution) |
-| Resident memory | < 25 MB | 4.41–4.48 MB |
-| Stripped release binary | < 4 MB | 0.688 MB (721,408 bytes) |
+| Resident memory | < 25 MB | 7.3 MB idle, 11.3 MB with the settings window open |
+| Stripped release binary | < 4 MB | 0.775 MB (813,056 bytes) |
 
 CPU figures come from a 30-second `TotalProcessorTime` sample while idle and
 while clicking at 50 CPS: both accrued 0 ms of processor time, i.e. below the
-15.6 ms Windows timer granularity (less than 0.05% of one core). The reported
+15.6 ms Windows timer granularity (less than 0.05% of one core). A second 10-second
+sample with the settings window open also accrued 0 ms. Working set is reported
+for a hidden settings window and again with the window open. The reported
 CPS is `clicks / session duration`, so very short sessions read slightly high
 (for example, 10 clicks at a 50 ms interval finished in 450 ms).
 
@@ -308,13 +356,18 @@ and the target application's message loop dominate at that point.
 
 - **Windows only.** The MVP targets Windows 10/11 x64 and uses Win32 directly.
 - **Console and tray icon.** The console window must stay open; closing it
-  terminates MegaClicker. The tray icon mirrors the main actions but there is no
-  settings GUI or hotkey rebinding yet.
-- **Function-key hotkeys only.** The toggle, profile, and quit hotkeys can be selected from F1–F12, but modifiers and arbitrary keys are not supported.
+  terminates MegaClicker. The tray icon mirrors the main actions and opens the
+  settings window. Without a working tray icon the settings window cannot be
+  opened, so edit `config.toml` by hand instead.
+- **Function-key hotkeys only.** The toggle, profile, and quit hotkeys can be selected from F1–F12, either in `config.toml` or in the settings window, but modifiers and arbitrary keys are not supported.
 - **Current cursor position.** MegaClicker does not move the cursor. Clicks go
   wherever the pointer currently is.
-- **Base config requires restart.** The base config is read once at startup.
-  Named profiles are re-read whenever they are selected.
+- **Base config requires restart.** Values edited in `config.toml` by hand are
+  read once at startup. Changes made through the settings window are applied
+  immediately. Named profiles are re-read whenever they are selected.
+- **Settings edit the default profile.** The window always saves to the base
+  config. A named profile keeps its own click settings; only hotkeys change
+  immediately while one is active.
 - **Active profile is not persisted.** After a restart MegaClicker uses the base
   configuration unless `--profile` is passed again.
 - **Elevation / UIPI.** Windows blocks synthetic input sent from a lower
@@ -342,12 +395,14 @@ and the target application's message loop dominate at that point.
   `%APPDATA%\MegaClicker`.
 - Synthetic mouse input is sent only while a session is running.
 - `--dry-run` never calls `SendInput`.
-- All `unsafe` Rust is confined to two platform modules:
+- All `unsafe` Rust is confined to three platform modules:
   [`src/input.rs`](src/input.rs), which wraps synthetic input, global hotkeys,
-  the message wait, the named mutex, and the console Ctrl+C handler; and
+  the message wait and pump, the named mutex, and the console Ctrl+C handler;
   [`src/tray.rs`](src/tray.rs), which wraps the notification-area icon, its
-  hidden window, the popup menu, and `ShellExecuteW`. Each `unsafe` block has a
-  `SAFETY:` comment. No other module contains `unsafe`.
+  hidden window, the popup menu, and `ShellExecuteW`; and
+  [`src/gui.rs`](src/gui.rs), which wraps the settings window and its controls.
+  Each `unsafe` block has a `SAFETY:` comment. No other module contains
+  `unsafe`.
 
 ## Project layout
 
@@ -355,12 +410,13 @@ and the target application's message loop dominate at that point.
 src/
   main.rs             startup, wiring, console UI, shutdown
   cli.rs              command-line arguments
-  config.rs           load, validate, create defaults, resolve path
+  config.rs           load, validate, render, save, create defaults, resolve path
   profile.rs          named profile storage, discovery, cycle selection
-  hotkey.rs           configurable global hotkeys, conflict errors, debounce
+  hotkey.rs           configurable global hotkeys, rebinding, conflict errors, debounce
   engine.rs           click thread, state machine, scheduling, tests
-  input.rs            Win32 input, hotkey, and message-wait wrappers
+  input.rs            Win32 input, hotkey, message pump, and mutex wrappers
   tray.rs             notification-area icon, popup menu, shell launching
+  gui.rs              native settings window and hotkey rebinding
   single_instance.rs  named-mutex single-instance guard
 config.toml           default config written on first run
 ```
@@ -374,11 +430,12 @@ cargo test
 cargo build --release
 ```
 
-Unit tests cover configuration parsing and every range error, hotkey validation,
-profile creation and discovery, profile cycling with broken files, click-limit
-accounting, debounce behavior, start/stop no-ops, start delay, applying a new
-config to the next session, tray string handling, and a dry-run session that
-reaches its limit.
+Unit tests cover configuration parsing and every range error, TOML rendering and
+round-tripping, saving and reloading the config file, settings-window field
+validation, hotkey validation, profile creation and discovery, profile cycling
+with broken files, click-limit accounting, debounce behavior, start/stop no-ops,
+start delay, applying a new config to the next session, tray string handling,
+and a dry-run session that reaches its limit.
 
 To measure timing safely without clicking anything:
 
@@ -397,10 +454,10 @@ Done:
 - [x] Configurable global hotkeys (`v0.1.1`)
 - [x] Multiple profiles and per-profile config switching (`v0.2.0`)
 - [x] Tray icon with a native menu (`v0.3.0`)
+- [x] Settings GUI, with hotkey rebinding (`v0.4.0`)
 
 Planned:
 
-- [ ] Settings GUI, with hotkey rebinding
 - [ ] Randomized/human-like intervals and cursor movement (with clear disclaimers)
 - [ ] Click sequences, multi-point macros, recording/playback
 - [ ] Installer, auto-start, updater
