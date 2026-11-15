@@ -26,13 +26,14 @@ use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, SendInput, UnregisterHotKey, INPUT, INPUT_0, INPUT_MOUSE, MOD_NOREPEAT,
     MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT, MOUSE_EVENT_FLAGS, VK_F6, VK_F8,
+    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT, MOUSE_EVENT_FLAGS, VK_F1, VK_F10,
+    VK_F11, VK_F12, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     MsgWaitForMultipleObjectsEx, PeekMessageW, MSG, PM_REMOVE, QS_HOTKEY, WM_HOTKEY,
 };
 
-use crate::config::{Button, ClickType};
+use crate::config::{Button, ClickType, HotkeyKey};
 
 // A click is injected through a single SendInput batch. Two events for a
 // single click, four for a double click.
@@ -120,28 +121,30 @@ fn mouse_input(flags: MOUSE_EVENT_FLAGS) -> INPUT {
     }
 }
 
-/// Virtual keys used by the fixed MVP hotkeys.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VirtualKey {
-    F6,
-    F8,
-}
-
-impl VirtualKey {
-    const fn code(self) -> u32 {
-        match self {
-            Self::F6 => VK_F6 as u32,
-            Self::F8 => VK_F8 as u32,
-        }
-    }
+fn virtual_key_code(key: HotkeyKey) -> u32 {
+    (match key {
+        HotkeyKey::F1 => VK_F1,
+        HotkeyKey::F2 => VK_F2,
+        HotkeyKey::F3 => VK_F3,
+        HotkeyKey::F4 => VK_F4,
+        HotkeyKey::F5 => VK_F5,
+        HotkeyKey::F6 => VK_F6,
+        HotkeyKey::F7 => VK_F7,
+        HotkeyKey::F8 => VK_F8,
+        HotkeyKey::F9 => VK_F9,
+        HotkeyKey::F10 => VK_F10,
+        HotkeyKey::F11 => VK_F11,
+        HotkeyKey::F12 => VK_F12,
+    }) as u32
 }
 
 /// Register a thread-global hotkey. `id` must be unique for this thread.
-pub fn register_hotkey(id: i32, key: VirtualKey) -> io::Result<()> {
+pub fn register_hotkey(id: i32, key: HotkeyKey) -> io::Result<()> {
     // SAFETY: A null window handle associates the hotkey with the calling
     // thread's message queue, which is where `wait_for_hotkey` reads it. `id`
     // is supplied by our own single call site and the key code is a constant.
-    let registered = unsafe { RegisterHotKey(ptr::null_mut(), id, MOD_NOREPEAT, key.code()) };
+    let registered =
+        unsafe { RegisterHotKey(ptr::null_mut(), id, MOD_NOREPEAT, virtual_key_code(key)) };
 
     if registered == 0 {
         Err(io::Error::last_os_error())

@@ -91,12 +91,73 @@ impl std::fmt::Display for ClickType {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotkeyKey {
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+}
+
+impl HotkeyKey {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::F1 => "F1",
+            Self::F2 => "F2",
+            Self::F3 => "F3",
+            Self::F4 => "F4",
+            Self::F5 => "F5",
+            Self::F6 => "F6",
+            Self::F7 => "F7",
+            Self::F8 => "F8",
+            Self::F9 => "F9",
+            Self::F10 => "F10",
+            Self::F11 => "F11",
+            Self::F12 => "F12",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_uppercase().as_str() {
+            "F1" => Some(Self::F1),
+            "F2" => Some(Self::F2),
+            "F3" => Some(Self::F3),
+            "F4" => Some(Self::F4),
+            "F5" => Some(Self::F5),
+            "F6" => Some(Self::F6),
+            "F7" => Some(Self::F7),
+            "F8" => Some(Self::F8),
+            "F9" => Some(Self::F9),
+            "F10" => Some(Self::F10),
+            "F11" => Some(Self::F11),
+            "F12" => Some(Self::F12),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for HotkeyKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Validated runtime configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Config {
     pub interval: Duration,
     pub button: Button,
     pub click_type: ClickType,
+    pub toggle_hotkey: HotkeyKey,
+    pub quit_hotkey: HotkeyKey,
     /// 0 means unlimited.
     pub click_limit: u64,
     pub start_delay: Duration,
@@ -108,6 +169,8 @@ impl Default for Config {
             interval: Duration::from_millis(DEFAULT_INTERVAL_MS),
             button: Button::Left,
             click_type: ClickType::Single,
+            toggle_hotkey: HotkeyKey::F6,
+            quit_hotkey: HotkeyKey::F8,
             click_limit: 0,
             start_delay: Duration::ZERO,
         }
@@ -178,6 +241,10 @@ struct RawConfig {
     button: String,
     #[serde(default = "default_click_type")]
     click_type: String,
+    #[serde(default = "default_toggle_hotkey")]
+    toggle_hotkey: String,
+    #[serde(default = "default_quit_hotkey")]
+    quit_hotkey: String,
     #[serde(default)]
     click_limit: i64,
     #[serde(default)]
@@ -194,6 +261,14 @@ fn default_button() -> String {
 
 fn default_click_type() -> String {
     ClickType::Single.as_str().to_owned()
+}
+
+fn default_toggle_hotkey() -> String {
+    HotkeyKey::F6.as_str().to_owned()
+}
+
+fn default_quit_hotkey() -> String {
+    HotkeyKey::F8.as_str().to_owned()
 }
 
 impl Config {
@@ -225,6 +300,26 @@ impl Config {
             DELAY_EXPECTED,
         )?;
 
+        let toggle_hotkey =
+            HotkeyKey::parse(&raw.toggle_hotkey).ok_or_else(|| ConfigError::InvalidField {
+                field: "toggle_hotkey",
+                value: raw.toggle_hotkey.clone(),
+                expected: "one of F1 through F12",
+            })?;
+        let quit_hotkey =
+            HotkeyKey::parse(&raw.quit_hotkey).ok_or_else(|| ConfigError::InvalidField {
+                field: "quit_hotkey",
+                value: raw.quit_hotkey.clone(),
+                expected: "one of F1 through F12",
+            })?;
+        if toggle_hotkey == quit_hotkey {
+            return Err(ConfigError::InvalidField {
+                field: "quit_hotkey",
+                value: raw.quit_hotkey.clone(),
+                expected: "a function key different from toggle_hotkey",
+            });
+        }
+
         let button = Button::parse(&raw.button).ok_or_else(|| ConfigError::InvalidField {
             field: "button",
             value: raw.button.clone(),
@@ -242,6 +337,8 @@ impl Config {
             interval: Duration::from_millis(interval_ms),
             button,
             click_type,
+            toggle_hotkey,
+            quit_hotkey,
             click_limit,
             start_delay: Duration::from_secs(start_delay_seconds),
         })
@@ -339,6 +436,8 @@ mod tests {
         assert_eq!(config.button, Button::Right);
         assert_eq!(config.interval, Duration::from_millis(100));
         assert_eq!(config.click_type, ClickType::Single);
+        assert_eq!(config.toggle_hotkey, HotkeyKey::F6);
+        assert_eq!(config.quit_hotkey, HotkeyKey::F8);
         assert_eq!(config.click_limit, 0);
         assert_eq!(config.start_delay, Duration::ZERO);
     }
@@ -355,6 +454,28 @@ mod tests {
                 parse(&text).is_ok(),
                 "click type {click_type} should be valid"
             );
+        }
+    }
+
+    #[test]
+    fn accepts_function_key_hotkeys_case_insensitively() {
+        let config = parse("toggle_hotkey = \"f1\"\nquit_hotkey = \"F12\"")
+            .expect("valid function keys must be accepted");
+        assert_eq!(config.toggle_hotkey, HotkeyKey::F1);
+        assert_eq!(config.quit_hotkey, HotkeyKey::F12);
+    }
+
+    #[test]
+    fn rejects_invalid_or_duplicate_hotkeys() {
+        for (toml, expected) in [
+            ("toggle_hotkey = \"A\"", "toggle_hotkey"),
+            (
+                "toggle_hotkey = \"F6\"\nquit_hotkey = \"F6\"",
+                "quit_hotkey",
+            ),
+        ] {
+            let error = parse(toml).expect_err("invalid hotkeys must fail");
+            assert!(error.to_string().contains(expected));
         }
     }
 

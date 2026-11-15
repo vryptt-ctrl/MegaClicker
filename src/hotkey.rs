@@ -5,16 +5,14 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-use crate::input::{self, VirtualKey};
+use crate::config::HotkeyKey;
+use crate::input;
 
-pub const TOGGLE_KEY: &str = "F6";
-pub const QUIT_KEY: &str = "F8";
+pub const TOGGLE_ID: i32 = 1;
+pub const QUIT_ID: i32 = 2;
 
 /// Duplicate toggle presses inside this window are ignored.
 pub const DEBOUNCE: Duration = Duration::from_millis(250);
-
-const TOGGLE_ID: i32 = 1;
-const QUIT_ID: i32 = 2;
 
 // Win32 ERROR_HOTKEY_ALREADY_REGISTERED.
 const ERROR_HOTKEY_ALREADY_REGISTERED: i32 = 1409;
@@ -42,15 +40,14 @@ pub enum HotkeyError {
 pub struct Hotkeys;
 
 impl Hotkeys {
-    pub fn register() -> Result<Self, HotkeyError> {
-        if let Err(error) = input::register_hotkey(TOGGLE_ID, VirtualKey::F6) {
-            return Err(map_error(TOGGLE_KEY, error));
+    pub fn register(toggle_key: HotkeyKey, quit_key: HotkeyKey) -> Result<Self, HotkeyError> {
+        if let Err(error) = input::register_hotkey(TOGGLE_ID, toggle_key) {
+            return Err(map_error(toggle_key, error));
         }
 
-        if let Err(error) = input::register_hotkey(QUIT_ID, VirtualKey::F8) {
-            // Do not leak the first registration if the second one fails.
+        if let Err(error) = input::register_hotkey(QUIT_ID, quit_key) {
             let _ = input::unregister_hotkey(TOGGLE_ID);
-            return Err(map_error(QUIT_KEY, error));
+            return Err(map_error(quit_key, error));
         }
 
         Ok(Self)
@@ -73,12 +70,12 @@ impl Drop for Hotkeys {
     }
 }
 
-fn map_error(key: &'static str, error: io::Error) -> HotkeyError {
+fn map_error(key: HotkeyKey, error: io::Error) -> HotkeyError {
     if error.raw_os_error() == Some(ERROR_HOTKEY_ALREADY_REGISTERED) {
-        HotkeyError::Conflict { key }
+        HotkeyError::Conflict { key: key.as_str() }
     } else {
         HotkeyError::Register {
-            key,
+            key: key.as_str(),
             details: error.to_string(),
         }
     }

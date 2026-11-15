@@ -384,12 +384,15 @@ pub fn limit_reached(count: u64, limit: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::HotkeyKey;
 
     fn test_config(interval_ms: u64, click_limit: u64) -> Config {
         Config {
             interval: Duration::from_millis(interval_ms),
             button: Button::Left,
             click_type: ClickType::Single,
+            toggle_hotkey: HotkeyKey::F6,
+            quit_hotkey: HotkeyKey::F8,
             click_limit,
             start_delay: Duration::ZERO,
         }

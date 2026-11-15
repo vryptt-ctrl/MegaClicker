@@ -89,7 +89,7 @@ fn run() -> anyhow::Result<ExitCode> {
 
     print_startup(&config_path, &loaded, cli.dry_run);
 
-    let hotkeys = match Hotkeys::register() {
+    let hotkeys = match Hotkeys::register(loaded.config.toggle_hotkey, loaded.config.quit_hotkey) {
         Ok(hotkeys) => hotkeys,
         Err(error @ HotkeyError::Conflict { .. }) => {
             eprintln!("[error] {error}");
@@ -141,7 +141,7 @@ fn event_loop(hotkeys: &Hotkeys, clicker: &Clicker, config: &Config) {
 
                     if clicker.is_running() {
                         if clicker.stop() {
-                            println!("[stop] F6 received; stopping...");
+                            println!("[stop] {} received; stopping...", config.toggle_hotkey);
                         }
                     } else {
                         match clicker.start() {
@@ -226,6 +226,8 @@ fn print_startup(path: &Path, loaded: &config::Loaded, dry_run: bool) {
         "  start_delay_seconds = {}",
         loaded.config.start_delay.as_secs()
     );
+    println!("  toggle_hotkey       = {}", loaded.config.toggle_hotkey);
+    println!("  quit_hotkey         = {}", loaded.config.quit_hotkey);
     println!(
         "Mode: {}",
         if dry_run {
@@ -234,7 +236,10 @@ fn print_startup(path: &Path, loaded: &config::Loaded, dry_run: bool) {
             "live (clicks are sent at the current cursor position)"
         }
     );
-    println!("Hotkeys: F6 = start/stop | F8 = quit | Ctrl+C = quit");
+    println!(
+        "Hotkeys: {} = start/stop | {} = quit | Ctrl+C = quit",
+        loaded.config.toggle_hotkey, loaded.config.quit_hotkey
+    );
 }
 
 fn print_session_start(config: &Config) {

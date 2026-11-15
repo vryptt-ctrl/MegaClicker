@@ -16,6 +16,11 @@ button = "left"
 # Allowed: "single", "double"
 click_type = "single"
 
+# Global function keys. They must be different from each other.
+# Allowed: "F1" through "F12"
+toggle_hotkey = "F6"
+quit_hotkey = "F8"
+
 # Stop automatically after this many click actions. 0 means unlimited.
 # Allowed: 0-1000000000
 click_limit = 0

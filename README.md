@@ -11,8 +11,8 @@ MegaClicker's MVP does one job: click reliably at a configured interval, under
 global hotkey control, with measurable timing and clean shutdown. Everything
 needed for that is included; everything else is deliberately left out.
 
-- Global `F6` starts and stops clicking even when another window is focused.
-- Global `F8` and `Ctrl+C` quit cleanly, stopping the click thread.
+- Configurable global function keys start/stop clicking and quit, even when another window is focused. Defaults are `F6` and `F8`.
+- `Ctrl+C` also quits cleanly, stopping the click thread.
 - Interval, mouse button, single/double click, click limit, and start delay are
   configurable in `%APPDATA%\MegaClicker\config.toml`.
 - `--dry-run` follows the real timing and counts clicks without sending input.
@@ -23,8 +23,8 @@ needed for that is included; everything else is deliberately left out.
 ### Not in the MVP
 
 No GUI, tray icon, settings window, randomized intervals, cursor movement,
-click sequences, recording/playback, profiles, scheduler, hotkey rebinding,
-installer, auto-start, updater, localization, analytics, crash reporting,
+click sequences, recording/playback, profiles, scheduler, installer, auto-start,
+updater, localization, analytics, crash reporting,
 network features, or non-Windows builds.
 
 ## Requirements
@@ -84,18 +84,18 @@ To remove MegaClicker, delete the executable and optionally the config folder
 
 | Key | Action |
 | --- | --- |
-| `F6` | Start clicking, or stop the current session. Works globally, even when MegaClicker is not the focused window. |
-| `F8` | Quit MegaClicker. |
+| Configured `toggle_hotkey` (default `F6`) | Start clicking, or stop the current session. Works globally, even when MegaClicker is not the focused window. |
+| Configured `quit_hotkey` (default `F8`) | Quit MegaClicker. |
 | `Ctrl+C` | Quit MegaClicker. |
 
 Toggle presses within 250 ms are ignored (debounce). Starting while already
-running is a no-op; stopping while stopped is a no-op. The hotkeys are fixed in
-the MVP and are not configurable.
+running is a no-op; stopping while stopped is a no-op. Both hotkeys can be set
+to different function keys from F1 through F12 in the configuration.
 
 ### Startup output
 
 ```text
-MegaClicker 0.1.0 - lightweight auto clicker for Windows
+MegaClicker 0.1.1 - lightweight auto clicker for Windows
 Config: C:\Users\you\AppData\Roaming\MegaClicker\config.toml (created with defaults)
   interval_ms         = 100
   button              = left
@@ -151,6 +151,8 @@ auto-create a missing file.
 | `click_type` | `"single"` | `"single"`, `"double"` | One press/release pair, or two rapid pairs per click action. |
 | `click_limit` | `0` | `0`–`1000000000` | Stop after this many click actions. `0` means unlimited. |
 | `start_delay_seconds` | `0` | `0`–`5` | Delay before the first click after each start. Applies only to the first click. |
+| `toggle_hotkey` | `"F6"` | `"F1"`–`"F12"` | Global key to start/stop clicking. Must differ from `quit_hotkey`. |
+| `quit_hotkey` | `"F8"` | `"F1"`–`"F12"` | Global key to quit. Must differ from `toggle_hotkey`. |
 
 String values are matched case-insensitively. Unknown keys are rejected rather
 than ignored, so typos cannot silently fall back to a default.
@@ -177,6 +179,11 @@ click_limit = 0
 
 # Allowed: 0-5
 start_delay_seconds = 0
+
+# Global function keys; they must differ from each other.
+# Allowed: "F1" through "F12"
+toggle_hotkey = "F6"
+quit_hotkey = "F8"
 ```
 
 ### Invalid configuration
@@ -244,7 +251,7 @@ and the target application's message loop dominate at that point.
 - **Windows only.** The MVP targets Windows 10/11 x64 and uses Win32 directly.
 - **Console only.** The console window must stay open; closing it terminates
   MegaClicker. There is no tray icon or GUI.
-- **Fixed hotkeys.** `F6` and `F8` cannot be rebound in the MVP.
+- **Function-key hotkeys only.** The toggle and quit hotkeys can be selected from F1–F12, but modifiers and arbitrary keys are not supported.
 - **Current cursor position.** MegaClicker does not move the cursor. Clicks go
   wherever the pointer currently is.
 - **Config requires restart.** Settings are read once at startup by design.
@@ -284,7 +291,7 @@ src/
   main.rs             startup, wiring, console UI, shutdown
   cli.rs              command-line arguments
   config.rs           load, validate, create defaults, resolve path
-  hotkey.rs           fixed global hotkeys, conflict errors, debounce
+  hotkey.rs           configurable global hotkeys, conflict errors, debounce
   engine.rs           click thread, state machine, scheduling, tests
   input.rs            the only unsafe module: Win32 safe wrappers
   single_instance.rs  named-mutex single-instance guard
