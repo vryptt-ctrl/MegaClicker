@@ -1,8 +1,16 @@
 /target
 **/*.rs.bk
 *.pdb
-.vscode/
-.idea/
 *.swp
 *.swo
+*~
+
+.vscode/
+.idea/
 .DS_Store
+
+*.zip
+SHA256SUMS.txt
+
+# Release artifacts
+megaclicker-*.exe
