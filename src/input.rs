@@ -1,7 +1,8 @@
 //! Win32 input, hotkey, and process-wide lock wrappers.
 //!
-//! MegaClicker needs five small Win32 surfaces:
+//! MegaClicker needs six small Win32 surfaces:
 //! * `SendInput` for synthetic mouse clicks,
+//! * `GetCursorPos`/`SetCursorPos` for optional cursor jitter,
 //! * `RegisterHotKey`/`UnregisterHotKey` for global hotkeys,
 //! * the thread message queue for `WM_HOTKEY` delivery,
 //! * a message pump for the tray and settings windows,
@@ -22,7 +23,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, HANDLE, HINSTANCE,
+    CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, HANDLE, HINSTANCE, POINT,
 };
 use windows_sys::Win32::System::Console::{SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_C_EVENT};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -34,8 +35,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     VK_F11, VK_F12, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, MsgWaitForMultipleObjectsEx, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
-    QS_ALLINPUT, WM_HOTKEY,
+    DispatchMessageW, GetCursorPos, MsgWaitForMultipleObjectsEx, PeekMessageW, SetCursorPos,
+    TranslateMessage, MSG, PM_REMOVE, QS_ALLINPUT, WM_HOTKEY,
 };
 
 use crate::config::{Button, ClickType, HotkeyKey};
@@ -86,6 +87,34 @@ pub fn send_click(button: Button, click_type: ClickType) -> Result<(), InputErro
         expected: count as usize,
         detail: send_error_detail(),
     })
+}
+
+/// Current cursor position in physical screen pixels.
+pub fn cursor_position() -> io::Result<(i32, i32)> {
+    let mut point = POINT { x: 0, y: 0 };
+
+    // SAFETY: `point` is a valid writable POINT that lives for the call.
+    let ok = unsafe { GetCursorPos(&mut point) };
+
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok((point.x, point.y))
+    }
+}
+
+/// Move the cursor to absolute screen coordinates. Windows clamps values that
+/// fall outside the desktop.
+pub fn set_cursor_position(x: i32, y: i32) -> io::Result<()> {
+    // SAFETY: Coordinates are plain integers; SetCursorPos has no pointer
+    // preconditions.
+    let ok = unsafe { SetCursorPos(x, y) };
+
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 fn send_error_detail() -> String {

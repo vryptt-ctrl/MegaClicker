@@ -20,12 +20,16 @@ pub const DEFAULT_CONFIG_TOML: &str = include_str!("../config.toml");
 
 pub const DEFAULT_INTERVAL_MS: u64 = 100;
 pub const MAX_INTERVAL_MS: u64 = 1_000;
+pub const MAX_INTERVAL_JITTER_PERCENT: u64 = 50;
+pub const MAX_CURSOR_JITTER_PX: u64 = 100;
 pub const MAX_CLICK_LIMIT: u64 = 1_000_000_000;
 pub const MAX_START_DELAY_SECONDS: u64 = 5;
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 const INTERVAL_EXPECTED: &str = "an integer from 1 to 1000 (milliseconds)";
+const INTERVAL_JITTER_EXPECTED: &str = "an integer from 0 to 50 (percent)";
+const CURSOR_JITTER_EXPECTED: &str = "an integer from 0 to 100 (pixels)";
 const LIMIT_EXPECTED: &str = "an integer from 0 to 1000000000 (0 = unlimited)";
 const DELAY_EXPECTED: &str = "an integer from 0 to 5 (seconds)";
 const BUTTON_EXPECTED: &str = "one of \"left\", \"right\", \"middle\"";
@@ -179,8 +183,13 @@ impl std::fmt::Display for HotkeyKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClickSettings {
     pub interval: Duration,
+    /// Randomize each interval by up to this percentage. 0 disables it.
+    pub interval_jitter_percent: u64,
     pub button: Button,
     pub click_type: ClickType,
+    /// Before each click, move the cursor within this many pixels of the
+    /// position where clicking started. 0 keeps the cursor in place.
+    pub cursor_jitter_px: u64,
     /// 0 means unlimited.
     pub click_limit: u64,
     pub start_delay: Duration,
@@ -190,8 +199,10 @@ impl Default for ClickSettings {
     fn default() -> Self {
         Self {
             interval: Duration::from_millis(DEFAULT_INTERVAL_MS),
+            interval_jitter_percent: 0,
             button: Button::Left,
             click_type: ClickType::Single,
+            cursor_jitter_px: 0,
             click_limit: 0,
             start_delay: Duration::ZERO,
         }
@@ -202,8 +213,13 @@ impl Default for ClickSettings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Config {
     pub interval: Duration,
+    /// Randomize each interval by up to this percentage. 0 disables it.
+    pub interval_jitter_percent: u64,
     pub button: Button,
     pub click_type: ClickType,
+    /// Before each click, move the cursor within this many pixels of the
+    /// position where clicking started. 0 keeps the cursor in place.
+    pub cursor_jitter_px: u64,
     pub toggle_hotkey: HotkeyKey,
     pub quit_hotkey: HotkeyKey,
     pub profile_hotkey: HotkeyKey,
@@ -216,8 +232,10 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             interval: Duration::from_millis(DEFAULT_INTERVAL_MS),
+            interval_jitter_percent: 0,
             button: Button::Left,
             click_type: ClickType::Single,
+            cursor_jitter_px: 0,
             toggle_hotkey: HotkeyKey::F6,
             quit_hotkey: HotkeyKey::F8,
             profile_hotkey: HotkeyKey::F7,
@@ -232,8 +250,10 @@ impl Default for Config {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConfigFields {
     pub interval_ms: i64,
+    pub interval_jitter_percent: i64,
     pub button: Button,
     pub click_type: ClickType,
+    pub cursor_jitter_px: i64,
     pub click_limit: i64,
     pub start_delay_seconds: i64,
     pub toggle_hotkey: HotkeyKey,
@@ -301,10 +321,14 @@ pub enum ConfigError {
 struct RawConfig {
     #[serde(default = "default_interval_ms")]
     interval_ms: i64,
+    #[serde(default)]
+    interval_jitter_percent: i64,
     #[serde(default = "default_button")]
     button: String,
     #[serde(default = "default_click_type")]
     click_type: String,
+    #[serde(default)]
+    cursor_jitter_px: i64,
     #[serde(default = "default_toggle_hotkey")]
     toggle_hotkey: String,
     #[serde(default = "default_quit_hotkey")]
@@ -324,10 +348,14 @@ struct RawConfig {
 struct RawProfile {
     #[serde(default = "default_interval_ms")]
     interval_ms: i64,
+    #[serde(default)]
+    interval_jitter_percent: i64,
     #[serde(default = "default_button")]
     button: String,
     #[serde(default = "default_click_type")]
     click_type: String,
+    #[serde(default)]
+    cursor_jitter_px: i64,
     #[serde(default)]
     click_limit: i64,
     #[serde(default)]
@@ -367,8 +395,10 @@ impl Config {
 
         let settings = validate_click_settings(
             raw.interval_ms,
+            raw.interval_jitter_percent,
             &raw.button,
             &raw.click_type,
+            raw.cursor_jitter_px,
             raw.click_limit,
             raw.start_delay_seconds,
         )?;
@@ -400,8 +430,10 @@ impl Config {
 
         Ok(Self {
             interval: settings.interval,
+            interval_jitter_percent: settings.interval_jitter_percent,
             button: settings.button,
             click_type: settings.click_type,
+            cursor_jitter_px: settings.cursor_jitter_px,
             toggle_hotkey,
             quit_hotkey,
             profile_hotkey,
@@ -415,8 +447,10 @@ impl Config {
     pub fn from_fields(fields: &ConfigFields) -> Result<Self, ConfigError> {
         let settings = validate_click_settings(
             fields.interval_ms,
+            fields.interval_jitter_percent,
             fields.button.as_str(),
             fields.click_type.as_str(),
+            fields.cursor_jitter_px,
             fields.click_limit,
             fields.start_delay_seconds,
         )?;
@@ -429,8 +463,10 @@ impl Config {
 
         Ok(Self {
             interval: settings.interval,
+            interval_jitter_percent: settings.interval_jitter_percent,
             button: settings.button,
             click_type: settings.click_type,
+            cursor_jitter_px: settings.cursor_jitter_px,
             toggle_hotkey: fields.toggle_hotkey,
             quit_hotkey: fields.quit_hotkey,
             profile_hotkey: fields.profile_hotkey,
@@ -452,6 +488,10 @@ impl Config {
              # Allowed: 1-1000\n\
              interval_ms = {interval_ms}\n\
              \n\
+             # Randomize each interval by up to this percentage. 0 disables randomization.\n\
+             # Allowed: 0-50\n\
+             interval_jitter_percent = {interval_jitter_percent}\n\
+             \n\
              # Mouse button to click.\n\
              # Allowed: \"left\", \"right\", \"middle\"\n\
              button = \"{button}\"\n\
@@ -460,6 +500,11 @@ impl Config {
              # still counts as ONE click action towards click_limit.\n\
              # Allowed: \"single\", \"double\"\n\
              click_type = \"{click_type}\"\n\
+             \n\
+             # Before each click, move the cursor to a random point within this many\n\
+             # pixels of where clicking started. 0 keeps the cursor in place.\n\
+             # Allowed: 0-100\n\
+             cursor_jitter_px = {cursor_jitter_px}\n\
              \n\
              # Global function keys. They must all be different from each other.\n\
              # Allowed: \"F1\" through \"F12\"\n\
@@ -475,8 +520,10 @@ impl Config {
              # Allowed: 0-5\n\
              start_delay_seconds = {start_delay_seconds}\n",
             interval_ms = self.interval.as_millis(),
+            interval_jitter_percent = self.interval_jitter_percent,
             button = self.button.as_str(),
             click_type = self.click_type.as_str(),
+            cursor_jitter_px = self.cursor_jitter_px,
             toggle_hotkey = self.toggle_hotkey.as_str(),
             quit_hotkey = self.quit_hotkey.as_str(),
             profile_hotkey = self.profile_hotkey.as_str(),
@@ -489,8 +536,10 @@ impl Config {
     pub fn with_click_settings(&self, settings: &ClickSettings) -> Self {
         Self {
             interval: settings.interval,
+            interval_jitter_percent: settings.interval_jitter_percent,
             button: settings.button,
             click_type: settings.click_type,
+            cursor_jitter_px: settings.cursor_jitter_px,
             click_limit: settings.click_limit,
             start_delay: settings.start_delay,
             ..*self
@@ -504,8 +553,10 @@ pub fn parse_click_settings(text: &str) -> Result<ClickSettings, ConfigError> {
 
     validate_click_settings(
         raw.interval_ms,
+        raw.interval_jitter_percent,
         &raw.button,
         &raw.click_type,
+        raw.cursor_jitter_px,
         raw.click_limit,
         raw.start_delay_seconds,
     )
@@ -513,8 +564,10 @@ pub fn parse_click_settings(text: &str) -> Result<ClickSettings, ConfigError> {
 
 fn validate_click_settings(
     interval_ms: i64,
+    interval_jitter_percent: i64,
     button: &str,
     click_type: &str,
+    cursor_jitter_px: i64,
     click_limit: i64,
     start_delay_seconds: i64,
 ) -> Result<ClickSettings, ConfigError> {
@@ -524,6 +577,20 @@ fn validate_click_settings(
         1,
         MAX_INTERVAL_MS,
         INTERVAL_EXPECTED,
+    )?;
+    let interval_jitter_percent = validate_integer(
+        "interval_jitter_percent",
+        interval_jitter_percent,
+        0,
+        MAX_INTERVAL_JITTER_PERCENT,
+        INTERVAL_JITTER_EXPECTED,
+    )?;
+    let cursor_jitter_px = validate_integer(
+        "cursor_jitter_px",
+        cursor_jitter_px,
+        0,
+        MAX_CURSOR_JITTER_PX,
+        CURSOR_JITTER_EXPECTED,
     )?;
     let click_limit = validate_integer(
         "click_limit",
@@ -554,8 +621,10 @@ fn validate_click_settings(
 
     Ok(ClickSettings {
         interval: Duration::from_millis(interval_ms),
+        interval_jitter_percent,
         button,
         click_type,
+        cursor_jitter_px,
         click_limit,
         start_delay: Duration::from_secs(start_delay_seconds),
     })
@@ -764,7 +833,9 @@ mod tests {
         let config = parse("button = \"right\"").expect("partial config must be valid");
         assert_eq!(config.button, Button::Right);
         assert_eq!(config.interval, Duration::from_millis(100));
+        assert_eq!(config.interval_jitter_percent, 0);
         assert_eq!(config.click_type, ClickType::Single);
+        assert_eq!(config.cursor_jitter_px, 0);
         assert_eq!(config.toggle_hotkey, HotkeyKey::F6);
         assert_eq!(config.quit_hotkey, HotkeyKey::F8);
         assert_eq!(config.profile_hotkey, HotkeyKey::F7);
@@ -834,15 +905,59 @@ mod tests {
     }
 
     #[test]
+    fn accepts_and_rejects_jitter_ranges() {
+        let config = parse("interval_jitter_percent = 50\ncursor_jitter_px = 100")
+            .expect("jitter upper bounds must be valid");
+        assert_eq!(config.interval_jitter_percent, 50);
+        assert_eq!(config.cursor_jitter_px, 100);
+
+        for (toml, field, range) in [
+            (
+                "interval_jitter_percent = 51",
+                "interval_jitter_percent",
+                "0 to 50",
+            ),
+            (
+                "interval_jitter_percent = -1",
+                "interval_jitter_percent",
+                "0 to 50",
+            ),
+            ("cursor_jitter_px = 101", "cursor_jitter_px", "0 to 100"),
+            ("cursor_jitter_px = -1", "cursor_jitter_px", "0 to 100"),
+        ] {
+            let error = parse(toml).expect_err("out-of-range jitter must fail");
+            let message = error.to_string();
+            assert!(message.contains(field), "message: {message}");
+            assert!(message.contains(range), "message: {message}");
+        }
+    }
+
+    #[test]
+    fn profile_parser_accepts_jitter_and_keeps_it_out_of_hotkeys() {
+        let settings = parse_click_settings(
+            "interval_ms = 25\ninterval_jitter_percent = 10\nbutton = \"right\"\n\
+             click_type = \"double\"\ncursor_jitter_px = 5",
+        )
+        .expect("valid profile jitter");
+        assert_eq!(settings.interval_jitter_percent, 10);
+        assert_eq!(settings.cursor_jitter_px, 5);
+    }
+
+    #[test]
     fn with_click_settings_keeps_hotkeys() {
         let config = parse(
             "interval_ms = 10\ntoggle_hotkey = \"F2\"\nquit_hotkey = \"F3\"\nprofile_hotkey = \"F4\"",
         )
         .expect("valid config");
-        let settings = parse_click_settings("interval_ms = 500").expect("valid settings");
+        let settings = parse_click_settings(
+            "interval_ms = 500\ninterval_jitter_percent = 20\ncursor_jitter_px = 8",
+        )
+        .expect("valid settings");
         let updated = config.with_click_settings(&settings);
 
         assert_eq!(updated.interval, Duration::from_millis(500));
+        assert_eq!(updated.interval_jitter_percent, 20);
+        assert_eq!(updated.cursor_jitter_px, 8);
         assert_eq!(updated.toggle_hotkey, HotkeyKey::F2);
         assert_eq!(updated.quit_hotkey, HotkeyKey::F3);
         assert_eq!(updated.profile_hotkey, HotkeyKey::F4);
@@ -850,10 +965,15 @@ mod tests {
 
     #[test]
     fn accepts_boundary_values() {
-        let config = parse("interval_ms = 1\nclick_limit = 0\nstart_delay_seconds = 0")
-            .expect("lower bounds must be valid");
+        let config = parse(
+            "interval_ms = 1\ninterval_jitter_percent = 50\nclick_limit = 0\n\
+             start_delay_seconds = 0\ncursor_jitter_px = 100",
+        )
+        .expect("lower bounds must be valid");
         assert_eq!(config.interval, Duration::from_millis(1));
+        assert_eq!(config.interval_jitter_percent, 50);
         assert_eq!(config.click_limit, 0);
+        assert_eq!(config.cursor_jitter_px, 100);
         assert_eq!(config.start_delay, Duration::ZERO);
 
         let config = parse("interval_ms = 1000\nclick_limit = 1000000000\nstart_delay_seconds = 5")
@@ -953,8 +1073,10 @@ mod tests {
     fn to_toml_round_trips_every_field() {
         let config = Config {
             interval: Duration::from_millis(37),
+            interval_jitter_percent: 35,
             button: Button::Middle,
             click_type: ClickType::Double,
+            cursor_jitter_px: 40,
             toggle_hotkey: HotkeyKey::F1,
             quit_hotkey: HotkeyKey::F11,
             profile_hotkey: HotkeyKey::F2,
@@ -970,8 +1092,10 @@ mod tests {
     fn from_fields_accepts_valid_values() {
         let fields = ConfigFields {
             interval_ms: 25,
+            interval_jitter_percent: 15,
             button: Button::Right,
             click_type: ClickType::Double,
+            cursor_jitter_px: 20,
             click_limit: 10,
             start_delay_seconds: 2,
             toggle_hotkey: HotkeyKey::F9,
@@ -984,8 +1108,10 @@ mod tests {
             config,
             Config {
                 interval: Duration::from_millis(25),
+                interval_jitter_percent: 15,
                 button: Button::Right,
                 click_type: ClickType::Double,
+                cursor_jitter_px: 20,
                 click_limit: 10,
                 start_delay: Duration::from_secs(2),
                 toggle_hotkey: HotkeyKey::F9,
@@ -999,8 +1125,10 @@ mod tests {
     fn from_fields_accepts_negative_zero() {
         let fields = ConfigFields {
             interval_ms: 100,
+            interval_jitter_percent: 0,
             button: Button::Left,
             click_type: ClickType::Single,
+            cursor_jitter_px: 0,
             click_limit: -0,
             start_delay_seconds: -0,
             toggle_hotkey: HotkeyKey::F6,
@@ -1010,6 +1138,8 @@ mod tests {
 
         let config = Config::from_fields(&fields).expect("signed zero is zero");
         assert_eq!(config.click_limit, 0);
+        assert_eq!(config.interval_jitter_percent, 0);
+        assert_eq!(config.cursor_jitter_px, 0);
         assert_eq!(config.start_delay, Duration::ZERO);
     }
 
@@ -1017,8 +1147,10 @@ mod tests {
     fn from_fields_rejects_out_of_range_and_duplicate_values() {
         let valid = ConfigFields {
             interval_ms: 100,
+            interval_jitter_percent: 0,
             button: Button::Left,
             click_type: ClickType::Single,
+            cursor_jitter_px: 0,
             click_limit: 0,
             start_delay_seconds: 0,
             toggle_hotkey: HotkeyKey::F6,
@@ -1040,6 +1172,27 @@ mod tests {
                     ..valid
                 },
                 "interval_ms",
+            ),
+            (
+                ConfigFields {
+                    interval_jitter_percent: 51,
+                    ..valid
+                },
+                "interval_jitter_percent",
+            ),
+            (
+                ConfigFields {
+                    cursor_jitter_px: -1,
+                    ..valid
+                },
+                "cursor_jitter_px",
+            ),
+            (
+                ConfigFields {
+                    cursor_jitter_px: 101,
+                    ..valid
+                },
+                "cursor_jitter_px",
             ),
             (
                 ConfigFields {

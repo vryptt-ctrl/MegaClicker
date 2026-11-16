@@ -279,6 +279,10 @@ fn template(name: &str) -> String {
 # Allowed: 1-1000
 interval_ms = 100
 
+# Randomize each interval by up to this percentage. 0 disables randomization.
+# Allowed: 0-50
+interval_jitter_percent = 0
+
 # Mouse button to click.
 # Allowed: "left", "right", "middle"
 button = "left"
@@ -287,6 +291,11 @@ button = "left"
 # still counts as ONE click action towards click_limit.
 # Allowed: "single", "double"
 click_type = "single"
+
+# Before each click, move the cursor to a random point within this many
+# pixels of where clicking started. 0 keeps the cursor in place.
+# Allowed: 0-100
+cursor_jitter_px = 0
 
 # Stop automatically after this many click actions. 0 means unlimited.
 # Allowed: 0-1000000000

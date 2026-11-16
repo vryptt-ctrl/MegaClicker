@@ -10,21 +10,24 @@ mod gui;
 mod hotkey;
 mod input;
 mod profile;
+mod random;
 mod single_instance;
 mod tray;
 
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clap::Parser;
 
 use crate::cli::Cli;
-use crate::config::{Button, ClickType, Config};
-use crate::engine::{ClickSink, Clicker, SessionReport, StartOutcome, StopReason};
+use crate::config::Config;
+use crate::engine::{ClickRequest, ClickSink, Clicker, SessionReport, StartOutcome, StopReason};
 use crate::gui::{Settings, SettingsEvent};
 use crate::hotkey::{HotkeyAction, HotkeyError, Hotkeys};
+use crate::random::Rng;
 use crate::single_instance::InstanceError;
 use crate::tray::{Tray, TrayEvent};
 
@@ -34,13 +37,71 @@ const EXIT_ALREADY_RUNNING: u8 = 3;
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const STATUS_INTERVAL: Duration = Duration::from_secs(5);
 
+/// State owned by the live input sink. The cursor anchor is captured on the
+/// first jittered click of each session, so moving the mouse during the start
+/// delay still chooses where clicking begins.
+struct SinkState {
+    anchor: Option<(i32, i32)>,
+    rng: Rng,
+}
+
 /// The live input sink. The engine owns it; all Win32 calls remain in
 /// `input.rs`.
-struct SystemSink;
+struct SystemSink {
+    state: Mutex<SinkState>,
+}
+
+impl SystemSink {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(SinkState {
+                anchor: None,
+                rng: Rng::seeded(random::seed()),
+            }),
+        }
+    }
+
+    fn state(&self) -> MutexGuard<'_, SinkState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
 
 impl ClickSink for SystemSink {
-    fn click(&self, button: Button, click_type: ClickType) -> Result<(), String> {
-        input::send_click(button, click_type).map_err(|error| error.to_string())
+    fn begin_session(&self) {
+        self.state().anchor = None;
+    }
+
+    fn click(&self, request: ClickRequest) -> Result<(), String> {
+        if request.cursor_jitter_px > 0 {
+            let (x, y) = {
+                let mut state = self.state();
+                let anchor = match state.anchor {
+                    Some(anchor) => anchor,
+                    None => {
+                        let anchor = input::cursor_position().map_err(|error| {
+                            format!("could not read the cursor position: {error}")
+                        })?;
+                        state.anchor = Some(anchor);
+                        anchor
+                    }
+                };
+
+                let radius = i64::from(request.cursor_jitter_px);
+                let span = u64::try_from(radius * 2 + 1).unwrap_or(u64::MAX);
+                let dx = i64::try_from(state.rng.below(span)).unwrap_or(0) - radius;
+                let dy = i64::try_from(state.rng.below(span)).unwrap_or(0) - radius;
+
+                (
+                    anchor.0.saturating_add(dx as i32),
+                    anchor.1.saturating_add(dy as i32),
+                )
+            };
+
+            input::set_cursor_position(x, y)
+                .map_err(|error| format!("could not move the cursor: {error}"))?;
+        }
+
+        input::send_click(request.button, request.click_type).map_err(|error| error.to_string())
     }
 }
 
@@ -137,7 +198,7 @@ fn run() -> anyhow::Result<ExitCode> {
     let sink: Box<dyn ClickSink> = if cli.dry_run {
         Box::new(engine::DryRunSink)
     } else {
-        Box::new(SystemSink)
+        Box::new(SystemSink::new())
     };
     let mut clicker = Clicker::spawn(active_config, sink)?;
 
@@ -528,26 +589,37 @@ fn print_startup(
     } else {
         println!("Profile: {profile_name}");
     }
-    println!("  interval_ms         = {}", active.interval.as_millis());
-    println!("  button              = {}", active.button);
-    println!("  click_type          = {}", active.click_type);
-    if active.click_limit == 0 {
-        println!("  click_limit         = 0 (unlimited)");
-    } else {
-        println!("  click_limit         = {}", active.click_limit);
-    }
-    println!("  start_delay_seconds = {}", active.start_delay.as_secs());
-    println!("  toggle_hotkey       = {}", active.toggle_hotkey);
-    println!("  quit_hotkey         = {}", active.quit_hotkey);
-    println!("  profile_hotkey      = {}", active.profile_hotkey);
     println!(
-        "Mode: {}",
-        if dry_run {
-            "dry-run (no mouse events are sent)"
-        } else {
-            "live (clicks are sent at the current cursor position)"
-        }
+        "  interval_ms              = {}",
+        active.interval.as_millis()
     );
+    println!(
+        "  interval_jitter_percent  = {}",
+        active.interval_jitter_percent
+    );
+    println!("  button                   = {}", active.button);
+    println!("  click_type               = {}", active.click_type);
+    println!("  cursor_jitter_px         = {}", active.cursor_jitter_px);
+    if active.click_limit == 0 {
+        println!("  click_limit              = 0 (unlimited)");
+    } else {
+        println!("  click_limit              = {}", active.click_limit);
+    }
+    println!(
+        "  start_delay_seconds      = {}",
+        active.start_delay.as_secs()
+    );
+    println!("  toggle_hotkey            = {}", active.toggle_hotkey);
+    println!("  quit_hotkey              = {}", active.quit_hotkey);
+    println!("  profile_hotkey           = {}", active.profile_hotkey);
+    let mode = if dry_run {
+        "dry-run (no mouse events are sent)"
+    } else if active.cursor_jitter_px > 0 {
+        "live (clicks are sent near where clicking started, with cursor jitter)"
+    } else {
+        "live (clicks are sent at the current cursor position)"
+    };
+    println!("Mode: {mode}");
     println!(
         "Hotkeys: {} = start/stop | {} = next profile | {} = quit | Ctrl+C = quit",
         active.toggle_hotkey, active.profile_hotkey, active.quit_hotkey
@@ -608,10 +680,12 @@ fn settings_summary(config: &Config) -> String {
     };
 
     format!(
-        "interval={} ms | button={} | type={} | limit={limit} | start delay={} s",
+        "interval={} ms | jitter={}% | button={} | type={} | cursor={} px | limit={limit} | start delay={} s",
         config.interval.as_millis(),
+        config.interval_jitter_percent,
         config.button,
         config.click_type,
+        config.cursor_jitter_px,
         config.start_delay.as_secs()
     )
 }

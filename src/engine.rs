@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::config::{Button, ClickType, Config};
+use crate::random::Rng;
 
 /// Spin only for the final part of a wait. This keeps CPU use low at normal
 /// click rates while still landing on the deadline accurately.
@@ -30,17 +31,32 @@ pub enum EngineError {
     Spawn(#[source] std::io::Error),
 }
 
+/// One click request. The cursor jitter is resolved by the sink because only it
+/// knows where the pointer is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClickRequest {
+    pub button: Button,
+    pub click_type: ClickType,
+    /// Maximum horizontal and vertical offset from the session anchor, in
+    /// pixels. 0 keeps the cursor where it is.
+    pub cursor_jitter_px: u32,
+}
+
 /// Receives one call per click action. Implementations may inject input or do
 /// nothing (dry-run).
 pub trait ClickSink: Send + 'static {
-    fn click(&self, button: Button, click_type: ClickType) -> Result<(), String>;
+    /// Called once before the first click of a session, before the start-delay
+    /// wait, so an implementation can forget any previous pointer anchor.
+    fn begin_session(&self) {}
+
+    fn click(&self, request: ClickRequest) -> Result<(), String>;
 }
 
 /// A sink that performs no input, used by `--dry-run` and engine tests.
 pub struct DryRunSink;
 
 impl ClickSink for DryRunSink {
-    fn click(&self, _button: Button, _click_type: ClickType) -> Result<(), String> {
+    fn click(&self, _request: ClickRequest) -> Result<(), String> {
         Ok(())
     }
 }
@@ -245,7 +261,7 @@ fn worker_loop(shared: Arc<Shared>, sink: Box<dyn ClickSink>) {
         };
 
         let origin = Instant::now();
-        let outcome = run_session(&shared, &config, sink.as_ref(), origin);
+        let outcome = run_session(&shared, &config, sink.as_ref(), origin, session);
         let count = shared.count.load(Ordering::SeqCst);
 
         let shutting_down = {
@@ -281,8 +297,22 @@ struct Outcome {
     error: Option<String>,
 }
 
-fn run_session(shared: &Shared, config: &Config, sink: &dyn ClickSink, origin: Instant) -> Outcome {
-    let mut schedule = Schedule::new(origin, config.start_delay, config.interval);
+fn run_session(
+    shared: &Shared,
+    config: &Config,
+    sink: &dyn ClickSink,
+    origin: Instant,
+    session: u64,
+) -> Outcome {
+    sink.begin_session();
+
+    let mut schedule = Schedule::new(
+        origin,
+        config.start_delay,
+        config.interval,
+        config.interval_jitter_percent,
+        crate::random::seed().wrapping_add(session),
+    );
 
     loop {
         if !wait_until(schedule.deadline(), &shared.stop) {
@@ -294,7 +324,12 @@ fn run_session(shared: &Shared, config: &Config, sink: &dyn ClickSink, origin: I
             return stopped_by_user(shared);
         }
 
-        if let Err(error) = sink.click(config.button, config.click_type) {
+        let request = ClickRequest {
+            button: config.button,
+            click_type: config.click_type,
+            cursor_jitter_px: u32::try_from(config.cursor_jitter_px).unwrap_or(u32::MAX),
+        };
+        if let Err(error) = sink.click(request) {
             return Outcome {
                 reason: StopReason::InputFailed,
                 stop_latency: None,
@@ -319,17 +354,28 @@ fn run_session(shared: &Shared, config: &Config, sink: &dyn ClickSink, origin: I
 
 /// Absolute deadline generator. `interval` is measured from deadline to
 /// deadline, which is the start-to-start interval required by the spec.
+/// Optional jitter picks a fresh interval for every step.
 #[derive(Debug, Clone, Copy)]
 struct Schedule {
     next: Instant,
     interval: Duration,
+    jitter_percent: u64,
+    rng: Rng,
 }
 
 impl Schedule {
-    fn new(origin: Instant, start_delay: Duration, interval: Duration) -> Self {
+    fn new(
+        origin: Instant,
+        start_delay: Duration,
+        interval: Duration,
+        jitter_percent: u64,
+        seed: u64,
+    ) -> Self {
         Self {
             next: origin.checked_add(start_delay).unwrap_or(origin),
             interval,
+            jitter_percent,
+            rng: Rng::seeded(seed),
         }
     }
 
@@ -338,11 +384,24 @@ impl Schedule {
     }
 
     fn advance(&mut self) {
-        self.next = self
-            .next
-            .checked_add(self.interval)
-            .unwrap_or_else(Instant::now);
+        let interval = jittered_interval(self.interval, self.jitter_percent, &mut self.rng);
+        self.next = self.next.checked_add(interval).unwrap_or_else(Instant::now);
     }
+}
+
+/// Pick the next interval. Jitter is a percentage of the configured interval
+/// and is clamped so the effective interval never drops below one millisecond.
+fn jittered_interval(interval: Duration, percent: u64, rng: &mut Rng) -> Duration {
+    if percent == 0 {
+        return interval;
+    }
+
+    let percent = percent.min(100);
+    let base = interval.as_millis() as u64;
+    let low = (base * (100 - percent) / 100).max(1);
+    let high = (base * (100 + percent) / 100).max(low);
+
+    Duration::from_millis(low + rng.below(high - low + 1))
 }
 
 fn stopped_by_user(shared: &Shared) -> Outcome {
@@ -398,14 +457,11 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     /// Records every click so tests can prove which settings were used.
-    struct RecordingSink(Arc<StdMutex<Vec<(Button, ClickType)>>>);
+    struct RecordingSink(Arc<StdMutex<Vec<ClickRequest>>>);
 
     impl ClickSink for RecordingSink {
-        fn click(&self, button: Button, click_type: ClickType) -> Result<(), String> {
-            self.0
-                .lock()
-                .expect("recording mutex")
-                .push((button, click_type));
+        fn click(&self, request: ClickRequest) -> Result<(), String> {
+            self.0.lock().expect("recording mutex").push(request);
             Ok(())
         }
     }
@@ -413,8 +469,10 @@ mod tests {
     fn test_config(interval_ms: u64, click_limit: u64) -> Config {
         Config {
             interval: Duration::from_millis(interval_ms),
+            interval_jitter_percent: 0,
             button: Button::Left,
             click_type: ClickType::Single,
+            cursor_jitter_px: 0,
             toggle_hotkey: HotkeyKey::F6,
             quit_hotkey: HotkeyKey::F8,
             profile_hotkey: HotkeyKey::F7,
@@ -441,6 +499,8 @@ mod tests {
             origin,
             Duration::from_millis(250),
             Duration::from_millis(100),
+            0,
+            1,
         );
 
         assert_eq!(schedule.deadline(), origin + Duration::from_millis(250));
@@ -455,7 +515,7 @@ mod tests {
     #[test]
     fn schedule_without_delay_starts_immediately() {
         let origin = Instant::now();
-        let mut schedule = Schedule::new(origin, Duration::ZERO, Duration::from_millis(10));
+        let mut schedule = Schedule::new(origin, Duration::ZERO, Duration::from_millis(10), 0, 1);
 
         assert_eq!(schedule.deadline(), origin);
         schedule.advance();
@@ -559,8 +619,16 @@ mod tests {
         assert_eq!(
             *recorded.lock().expect("recording mutex"),
             vec![
-                (Button::Left, ClickType::Single),
-                (Button::Right, ClickType::Double)
+                ClickRequest {
+                    button: Button::Left,
+                    click_type: ClickType::Single,
+                    cursor_jitter_px: 0,
+                },
+                ClickRequest {
+                    button: Button::Right,
+                    click_type: ClickType::Double,
+                    cursor_jitter_px: 0,
+                }
             ]
         );
 
@@ -586,5 +654,86 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(20));
 
         clicker.shutdown();
+    }
+
+    #[test]
+    fn cursor_jitter_reaches_the_sink() {
+        let recorded = Arc::new(StdMutex::new(Vec::new()));
+        let mut config = test_config(5, 1);
+        config.cursor_jitter_px = 7;
+        let mut clicker = Clicker::spawn(config, Box::new(RecordingSink(Arc::clone(&recorded))))
+            .expect("spawn clicker");
+
+        assert!(matches!(clicker.start(), StartOutcome::Started { .. }));
+        clicker
+            .events
+            .recv_timeout(Duration::from_secs(2))
+            .expect("session report");
+
+        assert_eq!(
+            *recorded.lock().expect("recording mutex"),
+            vec![ClickRequest {
+                button: Button::Left,
+                click_type: ClickType::Single,
+                cursor_jitter_px: 7,
+            }]
+        );
+
+        clicker.shutdown();
+    }
+
+    #[test]
+    fn zero_jitter_keeps_the_configured_interval() {
+        let mut rng = Rng::seeded(11);
+        let interval = Duration::from_millis(37);
+
+        for _ in 0..50 {
+            assert_eq!(jittered_interval(interval, 0, &mut rng), interval);
+        }
+    }
+
+    #[test]
+    fn jittered_intervals_stay_in_range_and_vary() {
+        let mut rng = Rng::seeded(9);
+        let mut values: Vec<u64> = (0..500)
+            .map(|_| jittered_interval(Duration::from_millis(100), 50, &mut rng).as_millis() as u64)
+            .collect();
+
+        assert!(values.iter().all(|value| (50..=150).contains(value)));
+        values.sort_unstable();
+        values.dedup();
+        assert!(
+            values.len() > 50,
+            "expected many distinct intervals, got {values:?}"
+        );
+    }
+
+    #[test]
+    fn jitter_never_produces_a_zero_interval() {
+        let mut rng = Rng::seeded(3);
+
+        for _ in 0..500 {
+            let interval = jittered_interval(Duration::from_millis(1), 50, &mut rng);
+            assert!(interval >= Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn jitter_range_covers_the_requested_percentage() {
+        let mut rng = Rng::seeded(5);
+        let mut lowest = u64::MAX;
+        let mut highest = 0;
+
+        for _ in 0..2_000 {
+            let value =
+                jittered_interval(Duration::from_millis(1000), 50, &mut rng).as_millis() as u64;
+            lowest = lowest.min(value);
+            highest = highest.max(value);
+        }
+
+        assert!(lowest >= 500, "lowest was {lowest}");
+        assert!(highest <= 1500, "highest was {highest}");
+        assert!(lowest < 600, "lowest was {lowest}");
+        assert!(highest > 1400, "highest was {highest}");
     }
 }

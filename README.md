@@ -17,9 +17,13 @@ needed for that is included; everything else is deliberately left out.
   profiles folder, and exit.
 - A native settings window edits every click setting and rebinds all three hotkeys without
   touching the TOML file by hand.
+- Optional interval randomization spreads clicks within a percentage of
+  `interval_ms`; optional cursor jitter moves the pointer within a configured
+  radius of where each session started.
 - `Ctrl+C` also quits cleanly, stopping the click thread.
-- Interval, mouse button, single/double click, click limit, and start delay are
-  configurable in `%APPDATA%\MegaClicker\config.toml`.
+- Interval, interval jitter, mouse button, single/double click, cursor jitter,
+  click limit, and start delay are configurable in
+  `%APPDATA%\MegaClicker\config.toml`.
 - `--dry-run` follows the real timing and counts clicks without sending input.
 - A named mutex prevents two copies from running at once.
 - A dedicated click thread with an atomic stop flag and condition-variable wake
@@ -27,10 +31,11 @@ needed for that is included; everything else is deliberately left out.
 
 ### Not in the MVP
 
-No randomized intervals, cursor movement,
-click sequences, recording/playback, scheduler, installer, auto-start,
-updater, localization, analytics, crash reporting,
-network features, or non-Windows builds.
+No click sequences, multi-point macros, recording/playback, scheduler,
+installer, auto-start, updater, localization, analytics, crash reporting,
+network features, or non-Windows builds. The randomization options are not
+anti-detection features; see
+[Known limitations](#known-limitations-and-mvp-trade-offs).
 
 ## Requirements
 
@@ -130,8 +135,10 @@ through `F12`, and Save/Cancel buttons.
 | Control | Edits |
 | --- | --- |
 | Interval (ms) | `interval_ms` |
+| Interval jitter (%) | `interval_jitter_percent` |
 | Mouse button | `button` |
 | Click type | `click_type` |
+| Cursor jitter (px) | `cursor_jitter_px` |
 | Click limit (0 = unlimited) | `click_limit` |
 | Start delay (s) | `start_delay_seconds` |
 | Toggle / Quit / Profile hotkey | `toggle_hotkey`, `quit_hotkey`, `profile_hotkey` |
@@ -161,17 +168,19 @@ window writes to.
 ### Startup output
 
 ```text
-MegaClicker 0.4.0 - lightweight auto clicker for Windows
+MegaClicker 0.5.0 - lightweight auto clicker for Windows
 Config: C:\Users\you\AppData\Roaming\MegaClicker\config.toml (created with defaults)
 Profile: default (click settings from config.toml)
-  interval_ms         = 100
-  button              = left
-  click_type          = single
-  click_limit         = 0 (unlimited)
-  start_delay_seconds = 0
-  toggle_hotkey       = F6
-  quit_hotkey         = F8
-  profile_hotkey      = F7
+  interval_ms              = 100
+  interval_jitter_percent  = 0
+  button                   = left
+  click_type               = single
+  cursor_jitter_px         = 0
+  click_limit              = 0 (unlimited)
+  start_delay_seconds      = 0
+  toggle_hotkey            = F6
+  quit_hotkey              = F8
+  profile_hotkey           = F7
 Mode: live (clicks are sent at the current cursor position)
 Hotkeys: F6 = start/stop | F7 = next profile | F8 = quit | Ctrl+C = quit
 Ready. Press F6 to start or stop, F7 to switch profile, F8 to quit.
@@ -219,9 +228,11 @@ auto-create a missing file.
 
 | Key | Default | Allowed values | Meaning |
 | --- | --- | --- | --- |
-| `interval_ms` | `100` | `1`–`1000` | Time between the **start** of consecutive clicks, in milliseconds. |
+| `interval_ms` | `100` | `1`–`1000` | Base time between the **start** of consecutive clicks, in milliseconds. |
+| `interval_jitter_percent` | `0` | `0`–`50` | Randomize each interval by up to this percentage of `interval_ms`. `0` disables it. |
 | `button` | `"left"` | `"left"`, `"right"`, `"middle"` | Mouse button to press. |
 | `click_type` | `"single"` | `"single"`, `"double"` | One press/release pair, or two rapid pairs per click action. |
+| `cursor_jitter_px` | `0` | `0`–`100` | Before each click, move the cursor to a random point within this many pixels of where the session started. `0` keeps it in place. |
 | `click_limit` | `0` | `0`–`1000000000` | Stop after this many click actions. `0` means unlimited. |
 | `start_delay_seconds` | `0` | `0`–`5` | Delay before the first click after each start. Applies only to the first click. |
 | `toggle_hotkey` | `"F6"` | `"F1"`–`"F12"` | Global key to start/stop clicking. Must differ from the other hotkeys. |
@@ -242,11 +253,20 @@ button event count.
 # Allowed: 1-1000
 interval_ms = 100
 
+# Randomize each interval by up to this percentage. 0 disables randomization.
+# Allowed: 0-50
+interval_jitter_percent = 0
+
 # Allowed: "left", "right", "middle"
 button = "left"
 
 # Allowed: "single", "double"
 click_type = "single"
+
+# Before each click, move the cursor within this many pixels of where clicking
+# started. 0 keeps the cursor in place.
+# Allowed: 0-100
+cursor_jitter_px = 0
 
 # 0 = unlimited. Allowed: 0-1000000000
 click_limit = 0
@@ -269,10 +289,10 @@ A profile is a named set of click settings stored as its own TOML file:
 %APPDATA%\MegaClicker\profiles\gaming.toml
 ```
 
-Profiles contain only `interval_ms`, `button`, `click_type`, `click_limit`, and
-`start_delay_seconds`. Hotkeys are global: they stay registered when profiles
-change. A missing profile file is created with defaults the first time it is
-selected:
+Profiles contain only `interval_ms`, `interval_jitter_percent`, `button`,
+`click_type`, `cursor_jitter_px`, `click_limit`, and `start_delay_seconds`.
+Hotkeys are global: they stay registered when profiles change. A missing profile
+file is created with defaults the first time it is selected:
 
 ```powershell
 .\megaclicker.exe --profile gaming
@@ -307,6 +327,16 @@ activity begins.
 - **Absolute scheduling.** Click deadlines are derived from a fixed session
   origin, so a slow click does not accumulate drift over time. `interval_ms` is
   measured from the start of one click to the start of the next.
+- **Interval jitter.** With `interval_jitter_percent` above zero, each step draws
+  a new interval uniformly between `interval_ms × (100 − jitter)%` and
+  `interval_ms × (100 + jitter)%`. The configured interval never falls below
+  1 ms. Jitter is sampled per step from a small built-in PRNG, so it is not a
+  guarantee against detection and the average rate stays near `interval_ms`.
+- **Cursor jitter.** With `cursor_jitter_px` above zero, the first click of a
+  session remembers the cursor position, and every click moves the pointer to a
+  random point within that many pixels horizontally and vertically before
+  pressing. The pointer jumps rather than glides, and each session re-anchors.
+  With `0`, MegaClicker never calls `GetCursorPos` or `SetCursorPos`.
 - **One click thread.** A single dedicated thread runs the click loop. Idle
   MegaClicker blocks on a condition variable and uses effectively no CPU.
 - **Fast stop.** A stop request sets an atomic flag. Long waits are split into
@@ -324,30 +354,35 @@ activity begins.
 ## Performance
 
 Measured on this machine with the release build, using a harness that drives the
-real binary through injected `F6`/`F8` hotkeys in `--dry-run` mode. Targets are
-from the MVP specification.
+real binary through injected `F6`/`F8` hotkeys in `--dry-run` mode. Timing rows
+use randomization disabled; with jitter enabled the mean stays near the
+configured interval, but individual gaps vary by design. Targets are from the
+MVP specification.
 
 | Metric | Target | Measured |
 | --- | --- | --- |
 | Interval accuracy, 10 CPS | ±10% | 10.3 CPS (30 clicks in 2.90 s) |
 | Interval accuracy, 100 CPS | ±10% | 100.1 CPS (1001 clicks in 10.00 s) |
-| Stop latency from `F6` | < 50 ms | 2.64 ms |
+| Stop latency from `F6` | < 50 ms | 1.46 ms |
 | Idle CPU | < 0.5% | 0.00% of one core (below timer resolution) |
-| Clicking CPU at 50 CPS | < 5% | 0.00% of one core (below timer resolution) |
-| Resident memory | < 25 MB | 7.3 MB idle, 11.3 MB with the settings window open |
-| Stripped release binary | < 4 MB | 0.775 MB (813,056 bytes) |
+| Clicking CPU at 50 CPS | < 5% | 0.10% of one core (31.25 ms in 30 s) |
+| Resident memory | < 25 MB | 7.4 MB idle, 11.3 MB with the settings window open |
+| Stripped release binary | < 4 MB | 0.784 MB (822,272 bytes) |
 
-CPU figures come from a 30-second `TotalProcessorTime` sample while idle and
-while clicking at 50 CPS: both accrued 0 ms of processor time, i.e. below the
-15.6 ms Windows timer granularity (less than 0.05% of one core). A second 10-second
-sample with the settings window open also accrued 0 ms. Working set is reported
-for a hidden settings window and again with the window open. The reported
-CPS is `clicks / session duration`, so very short sessions read slightly high
-(for example, 10 clicks at a 50 ms interval finished in 450 ms).
+CPU figures come from 30-second `TotalProcessorTime` samples while idle and
+while clicking at 50 CPS, plus a 10-second sample with the settings window open.
+Idle and settings-open samples accrued 0 ms, i.e. below the 15.6 ms Windows timer
+granularity; the clicking sample accrued 31.25 ms. Private memory was 1.5 MB
+idle and 2.1 MB with the settings window open. Working set is reported for a
+hidden settings window and again with the window open. The reported CPS is
+`clicks / session duration`, so very short sessions read slightly high (for
+example, 10 clicks at a 50 ms interval finished in 450 ms).
 
 A separate live-input test sent real `SendInput` events to a WinForms window:
 10 single-click actions produced 10 `MouseDown` events, and 5 double-click
 actions produced 5 `MouseDoubleClick` events, confirming end-to-end delivery.
+With `cursor_jitter_px = 20`, 25 live clicks visited 23 distinct positions, all
+within 17 px horizontally and 20 px vertically of the session anchor.
 
 Timing above 100 CPS is best effort: Windows timer resolution, input queueing,
 and the target application's message loop dominate at that point.
@@ -360,8 +395,14 @@ and the target application's message loop dominate at that point.
   settings window. Without a working tray icon the settings window cannot be
   opened, so edit `config.toml` by hand instead.
 - **Function-key hotkeys only.** The toggle, profile, and quit hotkeys can be selected from F1–F12, either in `config.toml` or in the settings window, but modifiers and arbitrary keys are not supported.
-- **Current cursor position.** MegaClicker does not move the cursor. Clicks go
-  wherever the pointer currently is.
+- **Cursor movement is jitter, not a path.** With `cursor_jitter_px` above zero,
+  each click jumps to a random point within a square around the position where
+  the session started. It does not glide, follow a recorded path, or move to
+  multiple targets. Without it, clicks go wherever the pointer currently is.
+- **Randomization is not a guarantee.** `interval_jitter_percent` and
+  `cursor_jitter_px` make output less uniform, but they are not designed to
+  evade anti-cheat, bot detection, or monitoring. Use MegaClicker only where
+  synthetic input is allowed.
 - **Base config requires restart.** Values edited in `config.toml` by hand are
   read once at startup. Changes made through the settings window are applied
   immediately. Named profiles are re-read whenever they are selected.
@@ -393,7 +434,8 @@ and the target application's message loop dominate at that point.
   reporting, and no auto-update mechanism.
 - It writes only the base config file and profile files under
   `%APPDATA%\MegaClicker`.
-- Synthetic mouse input is sent only while a session is running.
+- Synthetic mouse input is sent only while a session is running, and the cursor
+  is moved only when `cursor_jitter_px` is above zero.
 - `--dry-run` never calls `SendInput`.
 - All `unsafe` Rust is confined to three platform modules:
   [`src/input.rs`](src/input.rs), which wraps synthetic input, global hotkeys,
@@ -413,8 +455,9 @@ src/
   config.rs           load, validate, render, save, create defaults, resolve path
   profile.rs          named profile storage, discovery, cycle selection
   hotkey.rs           configurable global hotkeys, rebinding, conflict errors, debounce
-  engine.rs           click thread, state machine, scheduling, tests
-  input.rs            Win32 input, hotkey, message pump, and mutex wrappers
+  engine.rs           click thread, state machine, scheduling, interval jitter, tests
+  input.rs            Win32 input, cursor, hotkey, message pump, and mutex wrappers
+  random.rs           small built-in PRNG for jitter
   tray.rs             notification-area icon, popup menu, shell launching
   gui.rs              native settings window and hotkey rebinding
   single_instance.rs  named-mutex single-instance guard
@@ -434,8 +477,9 @@ Unit tests cover configuration parsing and every range error, TOML rendering and
 round-tripping, saving and reloading the config file, settings-window field
 validation, hotkey validation, profile creation and discovery, profile cycling
 with broken files, click-limit accounting, debounce behavior, start/stop no-ops,
-start delay, applying a new config to the next session, tray string handling,
-and a dry-run session that reaches its limit.
+start delay, applying a new config to the next session, interval jitter bounds
+and variability, PRNG determinism, cursor jitter reaching the input sink, tray
+string handling, and a dry-run session that reaches its limit.
 
 To measure timing safely without clicking anything:
 
@@ -455,10 +499,10 @@ Done:
 - [x] Multiple profiles and per-profile config switching (`v0.2.0`)
 - [x] Tray icon with a native menu (`v0.3.0`)
 - [x] Settings GUI, with hotkey rebinding (`v0.4.0`)
+- [x] Randomized intervals and cursor jitter, with clear disclaimers (`v0.5.0`)
 
 Planned:
 
-- [ ] Randomized/human-like intervals and cursor movement (with clear disclaimers)
 - [ ] Click sequences, multi-point macros, recording/playback
 - [ ] Installer, auto-start, updater
 - [ ] Localization

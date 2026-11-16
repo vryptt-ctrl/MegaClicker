@@ -39,7 +39,7 @@ const WINDOW_TITLE: &str = "MegaClicker settings";
 const WINDOW_STYLE: u32 = WS_CAPTION | WS_SYSMENU;
 
 const CLIENT_WIDTH: i32 = 460;
-const CLIENT_HEIGHT: i32 = 376;
+const CLIENT_HEIGHT: i32 = 440;
 
 const FIRST_ROW: i32 = 16;
 const ROW_STEP: i32 = 32;
@@ -71,13 +71,17 @@ const ID_TOGGLE_KEY: i32 = 106;
 const ID_QUIT_KEY: i32 = 107;
 const ID_PROFILE_KEY: i32 = 108;
 const ID_STATUS: i32 = 109;
+const ID_INTERVAL_JITTER: i32 = 110;
+const ID_CURSOR_JITTER: i32 = 111;
 const ID_SAVE: i32 = 1;
 const ID_CANCEL: i32 = 2;
 
-const CONTROL_IDS: [i32; 11] = [
+const CONTROL_IDS: [i32; 13] = [
     ID_INTERVAL,
+    ID_INTERVAL_JITTER,
     ID_BUTTON,
     ID_CLICK_TYPE,
+    ID_CURSOR_JITTER,
     ID_LIMIT,
     ID_DELAY,
     ID_TOGGLE_KEY,
@@ -221,6 +225,16 @@ impl Settings {
             ID_INTERVAL,
             &config.interval.as_millis().to_string(),
         );
+        set_text(
+            self.hwnd,
+            ID_INTERVAL_JITTER,
+            &config.interval_jitter_percent.to_string(),
+        );
+        set_text(
+            self.hwnd,
+            ID_CURSOR_JITTER,
+            &config.cursor_jitter_px.to_string(),
+        );
         set_text(self.hwnd, ID_LIMIT, &config.click_limit.to_string());
         set_text(
             self.hwnd,
@@ -305,22 +319,26 @@ fn show_error_on(owner: HWND, message: &str) {
 
 fn create_controls(hwnd: HWND) {
     label(hwnd, "Interval (ms)", row(0));
-    label(hwnd, "Mouse button", row(1));
-    label(hwnd, "Click type", row(2));
-    label(hwnd, "Click limit (0 = unlimited)", row(3));
-    label(hwnd, "Start delay (s)", row(4));
-    label(hwnd, "Toggle hotkey", row(5));
-    label(hwnd, "Quit hotkey", row(6));
-    label(hwnd, "Profile hotkey", row(7));
+    label(hwnd, "Interval jitter (%)", row(1));
+    label(hwnd, "Mouse button", row(2));
+    label(hwnd, "Click type", row(3));
+    label(hwnd, "Cursor jitter (px)", row(4));
+    label(hwnd, "Click limit (0 = unlimited)", row(5));
+    label(hwnd, "Start delay (s)", row(6));
+    label(hwnd, "Toggle hotkey", row(7));
+    label(hwnd, "Quit hotkey", row(8));
+    label(hwnd, "Profile hotkey", row(9));
 
     edit(hwnd, ID_INTERVAL, row(0), true);
-    combo(hwnd, ID_BUTTON, row(1));
-    combo(hwnd, ID_CLICK_TYPE, row(2));
-    edit(hwnd, ID_LIMIT, row(3), true);
-    edit(hwnd, ID_DELAY, row(4), true);
-    combo(hwnd, ID_TOGGLE_KEY, row(5));
-    combo(hwnd, ID_QUIT_KEY, row(6));
-    combo(hwnd, ID_PROFILE_KEY, row(7));
+    edit(hwnd, ID_INTERVAL_JITTER, row(1), true);
+    combo(hwnd, ID_BUTTON, row(2));
+    combo(hwnd, ID_CLICK_TYPE, row(3));
+    edit(hwnd, ID_CURSOR_JITTER, row(4), true);
+    edit(hwnd, ID_LIMIT, row(5), true);
+    edit(hwnd, ID_DELAY, row(6), true);
+    combo(hwnd, ID_TOGGLE_KEY, row(7));
+    combo(hwnd, ID_QUIT_KEY, row(8));
+    combo(hwnd, ID_PROFILE_KEY, row(9));
 
     let hint = "Saving writes config.toml and rebinds hotkeys immediately.\n\
                 A named profile keeps its own click settings.";
@@ -332,14 +350,14 @@ fn create_controls(hwnd: HWND) {
         ID_STATUS,
         Bounds {
             x: LABEL_X,
-            y: row(7) + 44,
+            y: row(9) + 44,
             width: CLIENT_WIDTH - 2 * LABEL_X,
             height: 34,
         },
     );
 
-    button(hwnd, ID_SAVE, "Save", CONTROL_X, row(7) + 96);
-    button(hwnd, ID_CANCEL, "Cancel", CONTROL_X + 135, row(7) + 96);
+    button(hwnd, ID_SAVE, "Save", CONTROL_X, row(9) + 96);
+    button(hwnd, ID_CANCEL, "Cancel", CONTROL_X + 135, row(9) + 96);
 
     let buttons: Vec<String> = Button::ALL
         .iter()
@@ -574,8 +592,10 @@ fn collect_fields(hwnd: HWND) -> Result<ConfigFields, ConfigError> {
 
     Ok(ConfigFields {
         interval_ms: read_number(hwnd, ID_INTERVAL, "interval_ms")?,
+        interval_jitter_percent: read_number(hwnd, ID_INTERVAL_JITTER, "interval_jitter_percent")?,
         button: Button::ALL[button.min(Button::ALL.len() - 1)],
         click_type: ClickType::ALL[click_type.min(ClickType::ALL.len() - 1)],
+        cursor_jitter_px: read_number(hwnd, ID_CURSOR_JITTER, "cursor_jitter_px")?,
         click_limit: read_number(hwnd, ID_LIMIT, "click_limit")?,
         start_delay_seconds: read_number(hwnd, ID_DELAY, "start_delay_seconds")?,
         toggle_hotkey: selected_hotkey(hwnd, ID_TOGGLE_KEY),
@@ -675,6 +695,6 @@ mod tests {
     fn rows_are_evenly_spaced() {
         assert_eq!(row(0), FIRST_ROW);
         assert_eq!(row(1) - row(0), ROW_STEP);
-        assert!(row(7) < CLIENT_HEIGHT);
+        assert!(row(9) + 96 + BUTTON_HEIGHT <= CLIENT_HEIGHT);
     }
 }
